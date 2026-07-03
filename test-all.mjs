@@ -1039,6 +1039,17 @@ if (
   fail('eval modes do not bound company/comp research against recursive fanout (#1235)');
 }
 
+if (
+  ofertaMode.includes('### Geo-mismatch check') &&
+  ofertaMode.includes('binding attendance requirement') &&
+  ofertaMode.includes('⚠️ **Geo-mismatch:** location field says remote, but JD body says') &&
+  ofertaMode.includes('silence is absence of signal, not agreement')
+) {
+  pass('oferta cross-checks the remote location field against JD-body signals (#1433)');
+} else {
+  fail('oferta missing geo-mismatch cross-check of location field vs JD body (#1433)');
+}
+
 const pipelineMode = readFile('modes/pipeline.md');
 if (
   pipelineMode.includes('## Liveness sweep') &&
@@ -3443,7 +3454,15 @@ try {
       '| 27 | 2026-01-08 | Acme | Solutions Engineer, Revenue | 3.0/5 | Applied | ❌ | [27](../reports/027-revenue-applied.md) | applied exact-title row |\n' +
       '| 28 | 2026-01-09 | Acme | Solutions Engineer, Revenue | 4.6/5 | Evaluated | ❌ | [28](../reports/028-revenue-eval.md) | evaluated exact-title row |\n' +
       '| 29 | 2026-01-08 | Acme | Data Engineer, Search | 3.1/5 | Applied | ❌ | [29](../reports/029-search-old.md) | malformed duplicate-number old row |\n' +
-      '| 29 | 2026-01-09 | Acme | Data Engineer, Search | 4.1/5 | Evaluated | ❌ | [30](../reports/030-search-new.md) | malformed duplicate-number new row |\n');
+      '| 29 | 2026-01-09 | Acme | Data Engineer, Search | 4.1/5 | Evaluated | ❌ | [30](../reports/030-search-new.md) | malformed duplicate-number new row |\n' +
+      // Distinct sibling roles at one company that the old fuzzy matcher
+      // false-merged (shared [software, engineer, infrastructure] → Jaccard 0.6).
+      // Exact company+title matching must keep both openings.
+      '| 31 | 2026-01-10 | Cohere | Software Engineer, Data Infrastructure | 3.4/5 | Evaluated | ❌ | [31](../reports/013-cohere-data-infra.md) | distinct role — must survive |\n' +
+      '| 32 | 2026-01-10 | Cohere | Senior Software Engineer, Agent Infrastructure | 4.0/5 | Evaluated | ❌ | [32](../reports/014-cohere-agent-infra.md) | distinct role — higher score |\n' +
+      // Exact company+role duplicate of #32 (same title, both Evaluated) — must
+      // collapse to one, keeping the higher score.
+      '| 33 | 2026-01-11 | Cohere | Senior Software Engineer, Agent Infrastructure | 3.7/5 | Evaluated | ❌ | [33](../reports/033-cohere-agent-dup.md) | exact-title duplicate |\n');
 
     const dedupResult = run(NODE, ['dedup-tracker.mjs'], { env: { ...process.env, CAREER_OPS_TRACKER: tracker } });
     if (dedupResult === null) {
@@ -3482,6 +3501,24 @@ try {
         pass('dedup-tracker handles duplicate tracker numbers using row-local line indexes');
       } else {
         fail(`dedup-tracker duplicate-number handling broken: ${searchRows.length} Search rows`);
+      }
+
+      // Regression: the old fuzzy matcher scored "Software Engineer, Data
+      // Infrastructure" and "Senior Software Engineer, Agent Infrastructure" at
+      // Jaccard 0.6 and deleted the lower-scored distinct role. Exact
+      // company+title matching must keep both openings.
+      const cohereDataInfra = deduped.split('\n').filter(l => l.includes('| Software Engineer, Data Infrastructure |'));
+      if (cohereDataInfra.length === 1) {
+        pass('dedup-tracker keeps distinct same-company Cohere role (Data Infrastructure) — no fuzzy false-merge');
+      } else {
+        fail(`dedup-tracker false-merged the distinct Cohere Data Infrastructure role: ${cohereDataInfra.length} rows`);
+      }
+
+      const cohereAgentInfra = deduped.split('\n').filter(l => l.includes('| Senior Software Engineer, Agent Infrastructure |'));
+      if (cohereAgentInfra.length === 1 && cohereAgentInfra[0].includes('4.0/5')) {
+        pass('dedup-tracker merges an exact company+role duplicate to one (keeps highest score)');
+      } else {
+        fail(`dedup-tracker exact-duplicate handling broken: ${cohereAgentInfra.length} Cohere Agent Infrastructure rows`);
       }
     }
   } finally {
@@ -5991,6 +6028,14 @@ try {
     pass('modes/_custom.md is in USER_PATHS (custom rules survive update-system.mjs)');
   } else {
     fail('modes/_custom.md is NOT in USER_PATHS — custom instructions would be wiped on update (#1198)');
+  }
+
+  // .claude/settings.json holds user-configured permissions and hooks (e.g. auto-backup).
+  // It must be in USER_PATHS so the updater never overwrites it (#1408).
+  if (userBlock.includes("'.claude/settings.json'")) {
+    pass('.claude/settings.json is in USER_PATHS (user harness config protected from update-system.mjs)');
+  } else {
+    fail('.claude/settings.json is NOT in USER_PATHS — user harness config would be wiped on update (#1408)');
   }
 
   // The template MUST be in SYSTEM_PATHS so updates deliver/refresh it.

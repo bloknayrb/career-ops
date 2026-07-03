@@ -225,6 +225,7 @@ const USER_PATHS = [
   'config/plugins.yml',
   'plugins.local/',
   'plugins.lock',
+  '.claude/settings.json',
 ];
 
 function parseVersionFile(raw) {
