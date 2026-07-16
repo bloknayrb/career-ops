@@ -27,9 +27,9 @@ import { readFile } from 'fs/promises';
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'fs';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { randomUUID } from 'node:crypto';
+import { PDF_PAGE_MARGIN, deriveFooterMarker, assertPdfFooter } from './pdf-config.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const PDF_PAGE_MARGIN = '0.6in';
 
 // Ensure output directory exists (fresh setup)
 mkdirSync(resolve(__dirname, 'output'), { recursive: true });
@@ -444,6 +444,10 @@ export async function renderHtmlToPdf(html, outputPath, opts = {}) {
     // Wait for fonts and images to settle
     await page.evaluate(() => document.fonts.ready);
 
+    // Capture the document's own page-bottom text so the footer check below
+    // can verify it survived into the PDF (clipped footers must fail loudly).
+    const footerMarker = await deriveFooterMarker(page);
+
     // Generate PDF
     const pdfBuffer = await page.pdf({
       printBackground: true,
@@ -458,6 +462,10 @@ export async function renderHtmlToPdf(html, outputPath, opts = {}) {
 
     // Write PDF
     await writeFile(outputPath, pdfBuffer);
+
+    // Post-generation footer check: the page-bottom content has been clipped
+    // past the printable edge before — twice — so its absence is a hard error.
+    await assertPdfFooter(outputPath, footerMarker);
 
     // Count pages (approximate from PDF structure)
     const pdfString = pdfBuffer.toString('latin1');
