@@ -42,6 +42,30 @@ bun.lock
 
 # Claude Code local
 .claude/settings.local.json
+.mcp.json
 .claude/memory/
 career-dashboard
 package-lock.json
+
+# Rendered/generated personal artifacts (never publish)
+cv-*.html
+cl-*.html
+*-tmp.html
+.career-ops-render-*.html
+
+# All pipeline data is personal (only the directory structure is tracked)
+data/*
+!data/.gitkeep
+
+# Personal working files
+interview-prep/
+modes/_custom.md
+tmp/
+
+# Sync and runtime artifacts
+*.sync-conflict-*
+.fuse_hidden*
+.stfolder/
+batch/batch-runner.pid
+batch/.batch-state.lock/
+batch/*.bak
