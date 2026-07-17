@@ -809,6 +809,9 @@ try {
 }
 try {
   const { repoRelativeManifestPath, injectPrintPageCss } = await import(pathToFileURL(join(ROOT, 'generate-pdf.mjs')).href);
+  // Derive the expected margin from the same constant the renderer uses: a
+  // third hardcoded '0.6in' here is how the margin drifted out of sync twice.
+  const { PDF_PAGE_MARGIN } = await import(pathToFileURL(join(ROOT, 'pdf-config.mjs')).href);
   const insideHtmlPath = join(ROOT, 'templates', 'cv-template.html');
   const outsideHtmlPath = join(dirname(ROOT), 'outside-cv-template.html');
 
@@ -826,7 +829,7 @@ try {
 
   const injectedPageCss = injectPrintPageCss('<html><head><title>CV</title></head><body></body></html>', 'letter');
   if (
-    injectedPageCss.includes('@page { size: Letter; margin: 0.6in; }') &&
+    injectedPageCss.includes(`@page { size: Letter; margin: ${PDF_PAGE_MARGIN}; }`) &&
     injectedPageCss.indexOf('career-ops-page-setup') < injectedPageCss.indexOf('</head>')
   ) {
     pass('PDF renderer injects CSS page size and margins before rendering');
@@ -835,7 +838,7 @@ try {
   }
 
   const mixedCasePageCss = injectPrintPageCss('<html><head></head><body></body></html>', 'Letter');
-  if (mixedCasePageCss.includes('@page { size: Letter; margin: 0.6in; }')) {
+  if (mixedCasePageCss.includes(`@page { size: Letter; margin: ${PDF_PAGE_MARGIN}; }`)) {
     pass('PDF renderer treats page format case-insensitively');
   } else {
     fail('PDF renderer falls back to A4 for mixed-case letter format');

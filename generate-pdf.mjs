@@ -27,7 +27,14 @@ import { readFile } from 'fs/promises';
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'fs';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { randomUUID } from 'node:crypto';
-import { PDF_PAGE_MARGIN, deriveFooterMarker, assertPdfFooter } from './pdf-config.mjs';
+import {
+  PDF_PAGE_MARGIN,
+  PDF_MARGIN_OVERRIDDEN,
+  PDF_PAGE_MARGIN_DEFAULT,
+  captureRenderedBodyText,
+  assertPdfContentCoverage,
+  readPdfPageCount,
+} from './pdf-config.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -429,7 +436,7 @@ export async function renderHtmlToPdf(html, outputPath, opts = {}) {
   // Write HTML to a temp file in baseDir so page.goto() gives a file://
   // origin that can load local images, fonts, and other resources.
   const tmpHtmlPath = resolve(baseDir, `.career-ops-render-${randomUUID()}.html`);
-  const { writeFile, unlink } = await import('fs/promises');
+  const { writeFile, unlink, rename } = await import('fs/promises');
   await writeFile(tmpHtmlPath, html, 'utf-8');
 
   const browser = await chromium.launch({ headless: true });
@@ -444,9 +451,10 @@ export async function renderHtmlToPdf(html, outputPath, opts = {}) {
     // Wait for fonts and images to settle
     await page.evaluate(() => document.fonts.ready);
 
-    // Capture the document's own page-bottom text so the footer check below
-    // can verify it survived into the PDF (clipped footers must fail loudly).
-    const footerMarker = await deriveFooterMarker(page);
+    // Capture the rendered document's full text so the coverage check below can
+    // verify every character of it survived into the PDF (clipped content must
+    // fail loudly).
+    const renderedBody = await captureRenderedBodyText(page);
 
     // Generate PDF
     const pdfBuffer = await page.pdf({
@@ -460,20 +468,40 @@ export async function renderHtmlToPdf(html, outputPath, opts = {}) {
       preferCSSPageSize: true,
     });
 
-    // Write PDF
-    await writeFile(outputPath, pdfBuffer);
+    // Write to a temp path first and promote only after the content check
+    // passes. Writing straight to outputPath meant a failed run left the bad
+    // PDF sitting where the good one used to be, while data/pdf-index.tsv was
+    // never updated — leaving the manifest pointing at a clipped artifact.
+    const tmpPdfPath = `${outputPath}.tmp-${randomUUID()}.pdf`;
+    await writeFile(tmpPdfPath, pdfBuffer);
 
-    // Post-generation footer check: the page-bottom content has been clipped
-    // past the printable edge before — twice — so its absence is a hard error.
-    await assertPdfFooter(outputPath, footerMarker);
+    let coverage;
+    try {
+      coverage = await assertPdfContentCoverage(tmpPdfPath, renderedBody);
+    } catch (err) {
+      await unlink(tmpPdfPath).catch(() => {});
+      throw err;
+    }
 
-    // Count pages (approximate from PDF structure)
-    const pdfString = pdfBuffer.toString('latin1');
-    const pageCount = (pdfString.match(/\/Type\s*\/Page[^s]/g) || []).length;
+    // Promote: the check either passed or explicitly did not run.
+    await rename(tmpPdfPath, outputPath);
 
-    console.log(`✅ PDF generated: ${outputPath}`);
+    const pageCount = await readPdfPageCount(pdfBuffer);
+
+    // Never print an unqualified success for a check that did not run: a silent
+    // skip reading as a green tick is the exact regression this guards.
+    if (coverage.checked) {
+      console.log(`✅ PDF generated: ${outputPath}`);
+      console.log(`🧾 Content check: all rendered text present across ${coverage.numPages} PDF page(s)`);
+    } else {
+      console.log(`⚠️  PDF generated (content check SKIPPED): ${outputPath}`);
+      console.log(`⚠️  Content check skipped — ${coverage.reason}`);
+    }
     console.log(`📊 Pages: ${pageCount}`);
     console.log(`📦 Size: ${(pdfBuffer.length / 1024).toFixed(1)} KB`);
+    if (PDF_MARGIN_OVERRIDDEN) {
+      console.log(`📐 Margin: ${PDF_PAGE_MARGIN} (overridden via CAREER_OPS_PDF_MARGIN; default ${PDF_PAGE_MARGIN_DEFAULT})`);
+    }
 
     try {
       updatePDFManifest(reportNum, outputPath, inputPath, format);

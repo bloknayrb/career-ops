@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Synthetic flow-content fixture — PDF content coverage check</title>
+<style>
+  /* Entirely synthetic fixture — no real person's data. The companion to
+     pdf-footer-fixture.html, covering the OTHER real document regime: content
+     that FLOWS. Nothing here is fixed-height and nothing is overflow:hidden,
+     so adding content pushes the document onto more pages instead of clipping
+     it. Both regimes ship in this repo, so both are tested: the pinned
+     fixture proves clipped content FAILS the coverage check, this one proves
+     reflow across page boundaries still PASSES it. A check that cannot tell
+     those two apart is worthless, and page count alone provably cannot.
+
+     tests/pdf-content-check.test.mjs renders this at 1, 2 and 3 pages by
+     keeping only the first N section.block elements. (Do not write that tag
+     literally in this comment: the test truncates by regex and would match
+     the comment text too.) */
+  body {
+    margin: 0;
+    font-family: Arial, Helvetica, sans-serif;
+    font-size: 12px;
+    line-height: 1.5;
+    color: #1a1a1a;
+  }
+  h1 { font-size: 20px; margin: 0 0 8px; }
+  h2 { font-size: 14px; margin: 12px 0 4px; }
+  p { margin: 4px 0; }
+  .block { margin-bottom: 10px; }
+</style>
+</head>
+<body>
+  <h1>Sam Placeholder</h1>
+  <p>Synthetic test document — not a real person. This content stands in for a multi-page CV whose sections flow naturally across page breaks.</p>
+  <section class="block">
+    <h2>Section One</h2>
+    <p>Placeholder Role, Example Corp. Performed entirely fictional duties for testing purposes, documented here only so the rendered document has enough text to span page boundaries.</p>
+  </section>
+  <section class="block">
+    <h2>Section Two</h2>
+    <p>Placeholder Role, Sample Industries. Coordinated imaginary workstreams and produced invented deliverables on a fabricated schedule for the benefit of this fixture.</p>
+  </section>
+  <section class="block">
+    <h2>Section Three</h2>
+    <p>Placeholder Role, Fictitious Holdings. Maintained nonexistent systems and reported synthetic metrics to a hypothetical steering group every quarter.</p>
+  </section>
+  <section class="block">
+    <h2>Section Four</h2>
+    <p>Placeholder Role, Notional Partners. Advised make-believe stakeholders on theoretical initiatives with no basis in any real engagement whatsoever.</p>
+  </section>
+  <section class="block">
+    <h2>Section Five</h2>
+    <p>Placeholder Role, Hypothetical Group. Drafted specimen documentation and reviewed dummy submissions against an invented quality rubric.</p>
+  </section>
+  <section class="block">
+    <h2>Section Six</h2>
+    <p>Placeholder Role, Imaginary Systems. Ran simulated pipelines against fabricated datasets and published counterfeit dashboards for review.</p>
+  </section>
+  <section class="block">
+    <h2>Section Seven</h2>
+    <p>Placeholder Role, Invented Solutions. Facilitated pretend workshops and captured fictional requirements from nonexistent business units.</p>
+  </section>
+  <section class="block">
+    <h2>Section Eight</h2>
+    <p>Placeholder Role, Sample Ventures. Modelled speculative scenarios and presented artificial findings to a fabricated advisory board.</p>
+  </section>
+  <section class="block">
+    <h2>Section Nine</h2>
+    <p>Placeholder Role, Dummy Enterprises. Curated synthetic archives and reconciled invented ledgers against imaginary source records.</p>
+  </section>
+  <section class="block">
+    <h2>Section Ten</h2>
+    <p>Placeholder Role, Placeholder Labs. Prototyped notional tooling and benchmarked it against entirely made-up baselines for this fixture.</p>
+  </section>
+  <section class="block">
+    <h2>Section Eleven</h2>
+    <p>Placeholder Role, Example Foundation. Administered fictional grants and summarised imaginary outcomes in specimen reports.</p>
+  </section>
+  <section class="block">
+    <h2>Section Twelve</h2>
+    <p>Placeholder Role, Test Consortium. Chaired hypothetical reviews and arbitrated invented disputes between fabricated working groups.</p>
+  </section>
+  <section class="block">
+    <h2>Section Thirteen</h2>
+    <p>Placeholder Role, Mock Industries. Authored dummy standards and shepherded them through a pretend ratification process.</p>
+  </section>
+  <section class="block">
+    <h2>Section Fourteen</h2>
+    <p>Placeholder Role, Fictional Works. Operated imaginary infrastructure and rehearsed synthetic incident drills on a notional rota.</p>
+  </section>
+  <section class="block">
+    <h2>Section Fifteen</h2>
+    <p>Placeholder Role, Specimen Trading. Reviewed invented contracts and negotiated fabricated terms with hypothetical counterparties.</p>
+  </section>
+  <section class="block">
+    <h2>Section Sixteen</h2>
+    <p>Placeholder Role, Sample Analytics. Produced counterfeit forecasts and validated them against equally counterfeit historical data.</p>
+  </section>
+  <section class="block">
+    <h2>Section Seventeen</h2>
+    <p>Placeholder Role, Notional Media. Commissioned imaginary content and measured its reception among fictional audiences.</p>
+  </section>
+  <section class="block">
+    <h2>Section Eighteen</h2>
+    <p>Placeholder Role, Invented Logistics. Scheduled pretend shipments and optimised routes across a wholly fabricated network.</p>
+  </section>
+  <section class="block">
+    <h2>Section Nineteen</h2>
+    <p>Placeholder Role, Example Maritime. Tracked imaginary vessels and filed synthetic manifests with a fictional port authority.</p>
+  </section>
+  <section class="block">
+    <h2>Section Twenty</h2>
+    <p>Placeholder Role, Dummy Aerospace. Simulated notional flight plans and reconciled them against fabricated telemetry archives.</p>
+  </section>
+  <section class="block">
+    <h2>Section Twenty-One</h2>
+    <p>Placeholder Role, Sample Utilities. Balanced invented load forecasts across a hypothetical grid of nonexistent substations.</p>
+  </section>
+  <section class="block">
+    <h2>Section Twenty-Two</h2>
+    <p>Placeholder Role, Mock Publishing. Edited specimen manuscripts and coordinated imaginary release schedules with pretend printers.</p>
+  </section>
+  <section class="block">
+    <h2>Section Twenty-Three</h2>
+    <p>Placeholder Role, Fictional Retail. Modelled counterfeit demand curves and staged make-believe inventory across invented depots.</p>
+  </section>
+  <section class="block">
+    <h2>Section Twenty-Four</h2>
+    <p>Placeholder Role, Notional Health. Audited synthetic records and summarised fabricated outcomes for a hypothetical review panel.</p>
+  </section>
+  <section class="block">
+    <h2>Section Twenty-Five</h2>
+    <p>Placeholder Role, Invented Education. Designed pretend curricula and assessed imaginary cohorts against a dummy rubric.</p>
+  </section>
+  <section class="block">
+    <h2>Section Twenty-Six</h2>
+    <p>Placeholder Role, Specimen Energy. Charted notional reserves and reported speculative yields to a fabricated regulator.</p>
+  </section>
+  <section class="block">
+    <h2>Section Twenty-Seven</h2>
+    <p>Placeholder Role, Sample Agriculture. Forecast imaginary harvests and logged synthetic soil readings from nonexistent plots.</p>
+  </section>
+  <section class="block">
+    <h2>Section Twenty-Eight</h2>
+    <p>Placeholder Role, Dummy Telecom. Provisioned pretend circuits and measured invented latencies across a fictional backbone.</p>
+  </section>
+  <p class="tail">End of synthetic document — Sam Placeholder — sam@example.com — 555-0199</p>
+</body>
+</html>
