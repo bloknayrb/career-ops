@@ -99,3 +99,30 @@ tests/cover-letter-prose.test.mjs
 # an untracked, previously un-ignored directory — exactly what the no-user-data
 # CI check exists to stop. Ignore them so a stranded copy can never be committed.
 .tmp-script-test-*/
+
+# Portfolio sources and outreach drafts. These are client-project and third-party
+# detail, and `origin` is a PUBLIC fork — .github/workflows/no-user-data.yml does
+# NOT cover portfolio-src/, so nothing upstream would have caught these. They were
+# untracked but un-ignored (i.e. one `git add -A` from publication) until 2026-07-29.
+portfolio-src/
+recruiter-outreach.md
+
+# Fork-local personal scripts. Same preservation mechanism as bk-voice-lint.mjs
+# above: untracked + absent from update-system.mjs's SYSTEM_PATHS allowlist is the
+# whole reason `apply` leaves them alone. Tracking any of them would also trip
+# validate-system-paths-coverage.mjs as an orphan and fail test-all.mjs. Note
+# merge-portfolio-pdfs.mjs additionally hardcodes a local absolute path.
+export-portfolio-pdfs.mjs
+export-vault-portfolio.mjs
+merge-application-pdf.mjs
+merge-portfolio-pdfs.mjs
+
+# Fork-local Upwork proposal mode. The `bk-` prefix is deliberate: update-system.mjs
+# merges its local SYSTEM_PATHS with a remoteSystemPaths list parsed from the REMOTE
+# updater, so a plain `modes/upwork.md` would be checked out over the day upstream
+# ships that name. A fork-local name upstream would never pick is the whole defence.
+modes/bk-upwork.md
+
+# Agent worktree scratch. Full repo checkouts left behind by subagent isolation;
+# tracked files only, but there is no reason for them to ever be staged.
+.claude/worktrees/
