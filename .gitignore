@@ -1,5 +1,10 @@
 # Personal data (user fills these)
 cv.md
+# Named client engagements; CI (.github/workflows/no-user-data.yml) fails any PR adding this
+article-digest.md
+voice-dna.md
+# Personal red-line patterns; survives update-system.mjs because it is not on its SYSTEM_PATHS allowlist
+redline-check.mjs
 data/applications.md
 data/pipeline.md
 data/scan-history.tsv
@@ -69,3 +74,15 @@ tmp/
 batch/batch-runner.pid
 batch/.batch-state.lock/
 batch/*.bak
+
+# Fork-local voice backstop. MUST stay untracked: update-system.mjs apply only
+# touches its allowlist and never sweeps unknown files, so "untracked + unlisted"
+# is the entire preservation mechanism (same trick as redline-check.mjs). Tracking
+# either of these also trips validate-system-paths-coverage.mjs as an orphan, and
+# a tracked tests/ file gets pruned by the updater on the first apply.
+bk-voice-lint.mjs
+tests/bk-voice-lint.test.mjs
+output/.voice-lint/
+# Same reasoning: tests/ is on SYSTEM_PATHS and the updater prunes any TRACKED
+# tests/ file absent from upstream, so this must stay untracked to survive.
+tests/cover-letter-prose.test.mjs

@@ -23,9 +23,15 @@
   }
 
   body {
+    /* 9.5pt/1.32 matches the letter approved and shipped to White & Case on
+       2026-07-15. The payload template's looser 10pt/1.4 spilled the same prose
+       onto a second page: it packs body copy into a bulleted <ul>, which buys
+       vertical space this template does not have. Prose mode renders every
+       audited paragraph as a paragraph, so the density has to come from here.
+       Length is enforced by the --max-pages guard, not by shrinking type. */
     font-family: Helvetica, Arial, sans-serif;
-    font-size: 10pt;
-    line-height: 1.4;
+    font-size: 9.5pt;
+    line-height: 1.32;
     color: #1a1a1a;
     background: #ffffff;
     /* Disable ligatures here as well; see the * rule above. */
@@ -54,37 +60,37 @@
   .divider {
     border: none;
     border-top: 0.5pt solid #cccccc;
-    margin: 6pt 0 8pt;
+    margin: 5pt 0 6pt;
   }
 
   .role-title {
     font-weight: 700;
     font-size: 11pt;
-    margin-top: 10pt;
     margin-bottom: 2pt;
   }
 
   .dateline {
     font-size: 9pt;
     color: #666666;
-    margin-bottom: 12pt;
+    margin-bottom: 8pt;
   }
 
   .greeting {
-    margin-bottom: 8pt;
+    margin-bottom: 6pt;
   }
 
   p {
-    margin-bottom: 8pt;
+    margin-bottom: 6.5pt;
+    text-align: left;
   }
 
   .achievements {
     list-style: none;
-    margin-bottom: 4pt;
+    margin-bottom: 6.5pt;
   }
 
   .achievements li {
-    margin-bottom: 5pt;
+    margin-bottom: 4pt;
     padding-left: 14pt;
     position: relative;
   }
@@ -95,10 +101,16 @@
     left: 0;
   }
 
-  .language-closing {
-    font-style: italic;
-    margin-top: 4pt;
-    margin-bottom: 8pt;
+  .signoff {
+    margin-top: 10pt;
+  }
+
+  .signoff .close {
+    margin-bottom: 2pt;
+  }
+
+  .signoff .signature {
+    font-weight: 600;
   }
 
   .footnotes {
@@ -125,14 +137,8 @@
   <div class="dateline">{{DATELINE}}</div>
 
   {{GREETING_BLOCK}}
-  <p>{{OPENING}}</p>
-  <p>{{PROFILE_INTRO}}</p>
-
-  {{ACHIEVEMENTS_BLOCK}}
-
-  {{PROBLEMS_BLOCK}}
-  {{CLOSING_BLOCK}}
-  {{LANGUAGE_CLOSING_BLOCK}}
+{{BODY_BLOCK}}
+  {{SIGNOFF_BLOCK}}
   {{FOOTNOTES_BLOCK}}
 </body>
 </html>
