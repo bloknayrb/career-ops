@@ -23,6 +23,8 @@ New to all this? That's the point. Claim an issue with a comment, ask anything i
 
 A large *feature* PR that skipped this step may be asked to start with an issue if it doesn't fit the architecture or roadmap — that's a scope conversation, never a judgment on your work.
 
+The review process you'll experience here is documented end-to-end in [Agentic maintenance: how this repo is run](https://santifer.io/ai-agent-fleet): why a first-timer's CI waits for human approval, why review comments arrive with test evidence, and what happens between your push and the merge.
+
 ### What makes a good PR
 - Fixes a bug listed in Issues
 - Addresses a feature request that was discussed and approved
@@ -69,7 +71,18 @@ We credit contributors publicly and invite high-signal folks up the ladder. Want
 
 career-ops core is **local-first and human-in-the-loop** by design — it runs on your machine and drafts applications for *you* to review and submit. Centralized infrastructure — hosted job aggregation, a shared matching service, proxies or Workers the project would operate — is **not part of the core**: it's heavier than a free local tool should carry, and it's where the project is headed as a *separate, opt-in service*. See the direction here: **[Where career-ops is going](https://github.com/santifer/career-ops/discussions/904)**.
 
-Rule of thumb before you build: **provider modules, languages, CLI support, modes, dashboard, docs and fixes → the core.** Bigger centralized or automation ideas (a hosted layer, auto-apply, scraping infrastructure) → **start in that discussion**, so we can route them together instead of a large PR that can't merge.
+Rule of thumb before you build: **provider modules, languages, CLI support, modes on the core path, dashboard, docs and fixes → the core.** Bigger centralized or automation ideas (a hosted layer, auto-apply, scraping infrastructure) → **start in that discussion**, so we can route them together instead of a large PR that can't merge.
+
+### What belongs in core (the parallel-feature test)
+
+career-ops says yes to a lot: providers, languages, CLI support, fixes. Where we are deliberately picky is **parallel features**: things adjacent to the job-search path that would each be useful on their own. Every merged feature is a promise to maintain it forever (docs, tests, agent context, upgrade paths), so "is it well built?" is not the bar. Before proposing one, run it through the four questions we use ourselves:
+
+1. **Is it on the core path?** The core path is: discover postings, evaluate, tailor, apply, track, close the loop. Infrastructure that strengthens that path is core even when invisible (dedup, atomic writes, the transition ledger). A feature that lives *next to* the path (contact management, calendaring, note-taking) starts as a plugin.
+2. **Who pays the maintenance?** A feature that solves one workflow brilliantly but adds surface for everyone (a new data file, a new script, a new mode) needs either demonstrated demand (issues from several people, not one) or a plugin home.
+3. **Plugin-first, with graduation.** Adjacent features start as plugins (see [docs/PLUGINS.md](docs/PLUGINS.md)): you own the release cycle, we list it in the registry. If a plugin earns real adoption, we will consider graduating it into core. Evidence-based promotion, not gatekeeping: it is how WordPress runs feature-projects.
+4. **Does it match the project's shape?** A mode or API that breaks established patterns creates cognitive load for every future user and contributor, even when it works. Expect us to ask for the spelling that matches the codebase before the merge.
+
+Failing one of these is a routing, not a rejection. Open the issue first and we will tell you which door fits: core, plugin, or separate project. The plugin registry gives real distribution, and an idea that is wrong for core today can still be the most useful thing you ship.
 
 ## Guidelines
 
