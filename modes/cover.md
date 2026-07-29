@@ -1,5 +1,12 @@
 # Mode: cover — Cover Letter Generator
 
+> Apply `voice-dna.md` (if present) to the letter body — full guardrail, conversational voice
+> included (Tier 1 + Tier 2). This mode does NOT load `_shared.md`, so read `voice-dna.md`
+> directly. **`voice-dna.md` and `modes/_profile.md` are two separate voice authorities and both
+> apply.** Reading `_profile.md` is not a substitute: on 2026-07-28 a letter that passed every
+> `_profile.md` rule still had zero contractions, zero semicolons and zero parentheticals, and the
+> candidate rejected it as not sounding like him.
+
 Generates a tailored cover letter for any candidate from a job description.
 Works in two modes:
 - **Slug mode:** `/career-ops cover {slug}` — loads the existing evaluation report draft as a starting point
@@ -37,6 +44,13 @@ Read `cv.md` for:
 Read `article-digest.md` if it exists — supplementary proof points and metrics take precedence over cv.md where they overlap.
 
 Read `modes/_profile.md` if it exists — the candidate's personalization file. It captures their target roles, adaptive framing and archetypes, exit narrative, cross-cutting advantage, proof points, comp targets, negotiation scripts, location policy, and any voice or writing-style rules they have added. Its rules **govern the letter's voice and structure and override the generic defaults in this mode**, so the candidate's personalization is never lost.
+
+Read `voice-dna.md` if it exists — the **second** voice authority, and the one this mode has
+historically skipped. `_profile.md` carries prohibitions (what must never appear); `voice-dna.md`
+§1-§2 carry the *measurable* traits that make prose sound like the candidate (contraction rate,
+semicolon and parenthetical rate, sentence-length variance, paragraph length, "And"/"But" openers,
+concession-before-correction), and §3-§4 carry the banned-word and banned-cadence lists. Where the
+two conflict, `_profile.md` wins. **Loading one is not loading the other.**
 
 ---
 
@@ -217,8 +231,10 @@ Cover Letter: [Role Title]
 
 ────────────────────────────────────────────────
 
-[Salutation — optional]
-Address the named hiring manager if known, e.g. "Dear Jane Smith,". Omit if no name.
+[Salutation — required]
+Address the named hiring manager if known, e.g. "Dear Jane Smith,". With no name,
+use "Dear Hiring Team,". Do not omit it: Step 9 locates the body by finding the
+salutation and the sign-off, and refuses to guess where the letter starts.
 
 [Opening — 2 sentences]
 Why applying + functional summary. Derived from Angle A. Uses JD mirror vocabulary.
@@ -265,6 +281,8 @@ End the draft with: "How does this read? Once you approve I'll generate the PDF.
 
 ---
 
+## Template resolution
+
 Resolve the cover-letter template with the shared resolver (do not hardcode `cover-letter-template.html`):
 
 - If the user named a template, run: `node cv-templates.mjs resolve cover "<name>"`
@@ -272,11 +290,52 @@ Resolve the cover-letter template with the shared resolver (do not hardcode `cov
 
 Fill the resolved template's `{{...}}` placeholders. A non-zero exit means the named template is missing/invalid — surface it, do not silently fall back.
 
+---
+
+## Step 8b — Audit gates (mandatory, before any PDF)
+
+Run **two independent agents** on the approved letter text. Two, not one: a single combined prompt
+reliably under-serves whichever concern is listed second, which is how three separate voice failures
+shipped on 2026-07-28.
+
+**Gate 1 — fabrication / attribution audit.** Sources: `cv.md`, `article-digest.md`, and
+`modes/_profile.md` → `## Red Lines`. Every factual claim must be traceable to one of them or to a
+statement the candidate made directly in this conversation. Check attribution verbs against the
+Red Lines table specifically, and check for scope widening (a true narrow claim restated more
+broadly), which is the failure mode that keeps every number correct and is therefore easy to miss.
+
+**Gate 2 — voice screen.** The prompt MUST name **both** `voice-dna.md` §1-§4 **and**
+`modes/_profile.md` → `## Voice Red Lines` / `## How Bryan Writes`. An agent told to check only
+`_profile.md` will report clean on a draft that fails `voice-dna.md` entirely. Require **measured
+counts, not impressions**: contraction rate, semicolon and parenthetical rate, sentence-length mean
+and standard deviation, paragraph length, "And"/"But" opener count, em dash count.
+
+**The re-run rule.** Any edit to the letter after the gates return invalidates both of them. Re-run
+before rendering. A correction is not exempt: on 2026-07-28 a fix for one fabricated sentence
+introduced a *different* fabricated sentence, twice in a row, and surgical post-audit edits left six
+voice defects clustered exactly at the edit sites. `bk-voice-lint.mjs` (run automatically by the
+renderer) is a thin mechanical backstop for a small set of already-violated rules; it detects
+almost none of this, and it is not a substitute for re-running Gate 2 on the final text.
+
+---
+
 ## Step 9 — Generate PDF
 
-Only after explicit user approval.
+Only after explicit user approval **and** after Step 8b has run on the exact text being rendered.
 
-Assemble the JSON payload:
+**Ship the approved letter itself. Never re-type it.** Save the letter you drafted
+in Step 8 — exactly as approved, no edits — to
+`output/cover-letter-{candidate-slug}-{company-slug}-{YYYY-MM-DD}.md`, then render
+that file. Every paragraph between the salutation and the sign-off ships verbatim.
+
+Why this is a rule and not a preference: the letter sent to Latham & Watkins on
+2026-07-15 was approved as prose, then re-keyed into JSON slots to render. The
+shipped PDF picked up a `profile_intro` paragraph that was in no approved draft.
+Both audit gates had passed — on a document that was not the one sent. Re-typing
+approved prose puts unaudited text into the PDF, and nothing downstream catches it.
+
+Write a metadata JSON to `/tmp/cover-meta-{company-slug}.json` (prose slots are not
+read; this supplies only the letterhead):
 
 ```json
 {
@@ -293,31 +352,41 @@ Assemble the JSON payload:
     "role_title": "{exact from JD}",
     "company": "{company name}",
     "city": "{JD city}",
-    "date": "{YYYY-MM-DD}",
-    "greeting": "{optional salutation, e.g. 'Dear Jane Smith,'; omit the key to skip the salutation}",
-    "opening": "{approved opening paragraph}",
-    "profile_intro": "{approved profile intro}",
-    "achievements": [
-      {"lead": "...", "impact": "..."}
-    ],
-    "problems_section": "{approved problems paragraph}",
-    "closing": "{approved closing}",
-    "language_closing": "{approved language sentence or null}"
+    "date": "{YYYY-MM-DD}"
   },
   "output_path": "output/{company-slug}-{role-slug}-cover.pdf"
 }
 ```
 
-Each `achievements[].lead` must be a bare phrase with no trailing comma or other punctuation — `generate-cover-letter.mjs` appends the comma when rendering (see Step 7).
-
-Write payload to `/tmp/cover-payload-{company-slug}.json`.
-
 Run:
 ```bash
-node generate-cover-letter.mjs --payload /tmp/cover-payload-{company-slug}.json
+node generate-cover-letter.mjs \
+  --markdown output/cover-letter-{candidate-slug}-{company-slug}-{YYYY-MM-DD}.md \
+  --meta /tmp/cover-meta-{company-slug}.json \
+  --report {tracker report number, if the letter belongs to one}
 ```
 
+`--report` links the PDF to its tracker row in `data/pdf-index.tsv`. Omit it for
+one-off letters with no report.
+
+The render fails, rather than shipping, when:
+
+- a paragraph of the approved letter did not survive into the PDF;
+- the letter has no salutation or no sign-off (it will not guess where the body is);
+- the letter runs past one page. Fix that by **cutting the letter and re-running the
+  Step 8 audits on the cut version** — not by passing `--max-pages`, and not by
+  tightening the template. `--max-pages` is for letters that are meant to run long.
+
 Report the output path and file size.
+
+**Payload mode is legacy.** `--payload` still renders from JSON slots and is what
+produced the Latham defect. If some role genuinely needs it, pair it with
+`--verify-prose output/cover-letter-….md` so the drift is caught:
+
+```bash
+node generate-cover-letter.mjs --payload /tmp/cover-payload-{company-slug}.json \
+  --verify-prose output/cover-letter-{candidate-slug}-{company-slug}-{YYYY-MM-DD}.md
+```
 
 ---
 

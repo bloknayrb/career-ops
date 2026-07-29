@@ -62,6 +62,12 @@ cl-*.html
 data/*
 !data/.gitkeep
 
+# Received offers/contracts written by the offer-prep mode: PII, never tracked.
+# Redundant with data/* above, but test-all.mjs asserts these exact lines so the
+# protection is stated explicitly rather than inherited from a broader glob.
+data/offers/*
+!data/offers/.gitkeep
+
 # Personal working files
 interview-prep/
 modes/_custom.md
@@ -86,3 +92,10 @@ output/.voice-lint/
 # Same reasoning: tests/ is on SYSTEM_PATHS and the updater prunes any TRACKED
 # tests/ file absent from upstream, so this must stay untracked to survive.
 tests/cover-letter-prose.test.mjs
+
+# test-all.mjs copies the whole repo (including cv.md, article-digest.md,
+# voice-dna.md) into these scratch dirs and deletes them in a finally block. On
+# Windows that rm can fail with EPERM, stranding a full copy of the user layer in
+# an untracked, previously un-ignored directory — exactly what the no-user-data
+# CI check exists to stop. Ignore them so a stranded copy can never be committed.
+.tmp-script-test-*/
