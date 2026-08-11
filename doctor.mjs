@@ -13,6 +13,8 @@ import dotenv from 'dotenv';
 import { discoverPlugins, pluginRoots, pluginStatus } from './plugins/_engine.mjs';
 import { resolveExtractorMode } from './browser-extract.mjs';
 import { parseConfigByExtension } from './jsonc-parse.mjs';
+// Non-durable patch: see redline-check.mjs header. Re-add after a system update.
+import { checkGroundTruthFreshness as gtFreshness, scanBannedStrings } from './redline-check.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const argv = process.argv.slice(2);
@@ -442,6 +444,49 @@ function checkPlugins(root) {
   return fixes.length ? { warn: true, label, fix: fixes } : { pass: true, label };
 }
 
+// ---------------------------------------------------------------------------
+// Ground Truth port integrity. Logic lives in ./redline-check.mjs on purpose:
+// doctor.mjs IS on update-system.mjs's SYSTEM_PATHS allowlist (~line 149), so a
+// system update overwrites this file. redline-check.mjs is not on that list and
+// survives. If an update wipes the two wrappers below, re-add them; the
+// SessionStart hook in .claude/settings.json runs the same checks meanwhile.
+// ---------------------------------------------------------------------------
+
+function checkGroundTruthFreshness(root) {
+  const r = gtFreshness(root);
+  if (r.status === 'stale') {
+    return {
+      warn: true,
+      label: 'Ground Truth port: STALE — the vault source changed since the last port',
+      fix: [
+        `Re-port from ${r.sourcePath} into article-digest.md + modes/_profile.md → ## Red Lines`,
+        `Then update the header to: <!-- source-sha256: ${r.expected} -->`,
+      ],
+    };
+  }
+  if (r.status === 'no-header') {
+    return {
+      warn: true,
+      label: 'Ground Truth port: article-digest.md has no source/sha256 header',
+      fix: 'Add <!-- source: ... --> and <!-- source-sha256: ... --> so drift is detectable',
+    };
+  }
+  if (r.status === 'skipped') return { pass: true, label: `Ground Truth port: ${r.reason} (skipped)` };
+  return { pass: true, label: 'Ground Truth port: in sync with vault source' };
+}
+
+function checkBannedStrings(root) {
+  const hits = scanBannedStrings(root);
+  if (hits.length) {
+    return {
+      warn: true,
+      label: `Red-line scan: ${hits.length} violation${hits.length === 1 ? '' : 's'} in candidate-facing files`,
+      fix: hits.slice(0, 12),
+    };
+  }
+  return { pass: true, label: 'Red-line scan: candidate-facing files clean' };
+}
+
 async function main() {
   console.log('\ncareer-ops doctor');
   console.log('================\n');
@@ -462,6 +507,8 @@ async function main() {
     checkAutoDir('output'),
     checkAutoDir('reports'),
     checkPlugins(projectRoot),
+    checkGroundTruthFreshness(projectRoot),
+    checkBannedStrings(projectRoot),
   ].filter(Boolean);
 
   // Network-bound ATS slug probe — only under --strict.
