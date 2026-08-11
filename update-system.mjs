@@ -58,6 +58,12 @@ export const REEXEC_BUFFER_TIMEOUT_MS = parsePositiveInt(process.env.CAREER_OPS_
 
 // System layer paths — ONLY these files get updated
 const SYSTEM_PATHS = [
+  // .gitattributes governs how every other path below is written to disk, and
+  // `apply` checks paths out one at a time in this order: if it landed later,
+  // everything before it would be written under the old core.autocrlf setting
+  // on an existing install, silently (once text=auto is live, git status stays
+  // clean and only a second update would repair it).
+  '.gitattributes',
   'modes/README.md',
   'modes/_shared.md',
   'modes/_writing.md',
@@ -66,6 +72,7 @@ const SYSTEM_PATHS = [
   'modes/_brief.template.md',
   'modes/oferta.md',
   'modes/pdf.md',
+  'modes/pdf/',
   'modes/cover.md',
   'modes/email.md',
   'modes/add.md',
@@ -138,6 +145,7 @@ const SYSTEM_PATHS = [
   'generate-latex.mjs',
   'extract-latex-content.mjs',
   'patch-latex-content.mjs',
+  'lib/cli-flags.mjs',
   'lib/latex-escape.mjs',
   'lib/latex-content.mjs',
   'lib/context-budget.mjs',
@@ -162,6 +170,7 @@ const SYSTEM_PATHS = [
   'tracker-aliases.json',
   'set-status.mjs',
   'set-status-tests.mjs',
+  'mark-pdf-ready.mjs',
   'normalize-statuses.mjs',
   'cv-sync-check.mjs',
   'verify-cv-facts.mjs',
@@ -181,7 +190,11 @@ const SYSTEM_PATHS = [
   'providers/',
   'seeds/',
   'tests/',
+  'user-agent.mjs',
   'doctor.mjs',
+  // doctor.mjs imports this one: an install that receives the new doctor
+  // without it would crash on startup.
+  'jsonc-parse.mjs',
   'check-liveness.mjs',
   'liveness-core.mjs',
   'liveness-api.mjs',
@@ -200,6 +213,7 @@ const SYSTEM_PATHS = [
   'process-quality.test.mjs',
   'company-history.mjs',
   'company-history.test.mjs',
+  'rejection-latency.mjs',
   'salary-gap.mjs',
   'funnel-velocity.mjs',
   'assessment-log.mjs',
@@ -235,6 +249,7 @@ const SYSTEM_PATHS = [
   'fix-slugs.mjs',
   'updater-migration-tests.mjs',
   'validate-system-paths-coverage.mjs',
+  'validate-untrusted-content-coverage.mjs',
   'reply-matcher.mjs',
   'reply-matcher.test.mjs',
   'reply-watch.mjs',
@@ -311,12 +326,14 @@ const SYSTEM_PATHS = [
   'build-cv-html.mjs',
   'cv-sections-core.mjs',
   'cv-templates.mjs',
+  'playwright.cv.config.mjs',
   'test/cv-templates.test.mjs',
   'test/cover-resolver.test.mjs',
   'test/pipeline-lock.test.mjs',
   'test/profile-photo.test.mjs',
   'templates/cv-template.zh-minimal.html',
   'test/zh-minimal-template.test.mjs',
+  'test/cv-visual/',
   'scaffolder/',
   'Dockerfile',
   'docker-compose.yml',
@@ -333,6 +350,7 @@ const SYSTEM_PATHS = [
   'opencode.example.json',
   'seed-fixture.mjs',
   'test-fixtures/',
+  'upgrade-tests.mjs',
 ];
 
 const BOOTSTRAP_PATHS = [
@@ -366,7 +384,14 @@ const BOOTSTRAP_PATHS = [
 ];
 
 // User layer paths — NEVER touch these (safety check)
-const USER_PATHS = [
+/**
+ * Files and directories the updater must never touch — the USER layer of the
+ * data contract (DATA_CONTRACT.md). Exported so other tooling can derive the
+ * same boundary instead of re-listing it: a hardcoded second copy is how a
+ * fourth user file eventually gets policed by something that has no business
+ * having an opinion about it (#2480).
+ */
+export const USER_PATHS = [
   'cv.md',
   'config/profile.yml',
   'modes/_profile.md',

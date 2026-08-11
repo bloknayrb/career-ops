@@ -73,18 +73,16 @@ import { fileURLToPath } from 'url';
 import { extractTrackerReportNumbers, resolveColumns, parseTrackerRow } from './tracker-parse.mjs';
 import { roleFuzzyMatch } from './role-matcher.mjs';
 import {
-  rebuildRow, resolveTrackerPath, trackerLockDirFor, acquireTrackerLock,
-  writeFileAtomic, loadCanonicalStates, resolveCanonicalState, normalizeCompany, cell,
+  rebuildRow, resolveTrackerPath, writeFileAtomic, loadCanonicalStates, resolveCanonicalState,
+  normalizeCompany, cell, CLI_EXIT, makeCliFailWith, acquireTrackerLockForCli,
 } from './tracker-utils.mjs';
 
 const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
 const STATES_FILE = join(CAREER_OPS, 'templates/states.yml');
 
-const EXIT_OK = 0;
-const EXIT_USAGE = 1;
-const EXIT_NOT_FOUND = 2;
-const EXIT_AMBIGUOUS = 3;
-const EXIT_LOCK_TIMEOUT = 4;
+// LOCK_TIMEOUT is not destructured here — that exit path is raised inside
+// acquireTrackerLockForCli() itself (tracker-utils.mjs), via CLI_EXIT.LOCK_TIMEOUT.
+const { OK: EXIT_OK, USAGE: EXIT_USAGE, NOT_FOUND: EXIT_NOT_FOUND, AMBIGUOUS: EXIT_AMBIGUOUS } = CLI_EXIT;
 
 const USAGE = `Usage: node set-status.mjs <report#|company> <state> [--note "..."] [--role "..."] [--on YYYY-MM-DD] [--force] [--dry-run] [--json]
        node set-status.mjs --row N <state> [...]        (explicit tracker row ID)
@@ -174,25 +172,9 @@ const stateInput = explicitSelector ? positional[0] : positional[1];
 // must not be treated as ambiguous.
 const isBareNumericSelector = selector !== null && /^\d+$/.test(selector);
 
-/**
- * Emit a structured error and exit.
- *
- * With --json the error object goes to stdout so callers parse one stream; the
- * human-readable message always goes to stderr.
- *
- * @param {number} exitCode - Process exit code (see EXIT_* contract above).
- * @param {string} code - Stable machine-readable error code.
- * @param {string} message - Human-readable explanation.
- * @param {object} [extra] - Extra JSON fields (e.g. candidates).
- * @returns {never}
- */
-function failWith(exitCode, code, message, extra = {}) {
-  if (flags.json) {
-    console.log(JSON.stringify({ error: message, code, ...extra }));
-  }
-  console.error(`❌ ${message}`);
-  process.exit(exitCode);
-}
+// Shared with every other canonical tracker-writer CLI (tracker-utils.mjs) so
+// the JSON-vs-human error contract can't drift between them.
+const failWith = makeCliFailWith(flags.json);
 
 /**
  * Print usage (plus an optional specific complaint) and exit 1.
@@ -239,6 +221,49 @@ if (!existsSync(APPS_FILE)) {
 }
 
 /**
+ * Reduce a selector's candidate list to exactly one row, or exit.
+ *
+ * Every selector path shares one shape: match, optionally narrow by --role,
+ * refuse to guess between survivors, return the unique row. Only the predicate
+ * and the two messages differ.
+ *
+ * Centralising it matters more than the duplication it removes. **Failing
+ * closed on 2+ candidates is the #1704 fix** — a stale tracker # reused across
+ * two rows makes "the first match" a silent coin flip on which company gets
+ * edited. While that behaviour lived in three copies, a future change that
+ * reintroduced first-match-wins in one branch would have been invisible in the
+ * other two. There is now one place to get it wrong, and one place to test.
+ *
+ * Note --role only ever *narrows* here; it never validates a lone match. That
+ * is deliberate and load-bearing: the #2009 check downstream compares the
+ * resolved row against --role precisely because a selector matching exactly
+ * one row never reaches the narrowing branch. Do not "fix" that by validating
+ * here — the two checks answer different questions.
+ *
+ * @param {object[]} matches - Rows matching the selector, before --role narrowing.
+ * @param {object} messages - Selector-specific failure text.
+ * @param {string} messages.notFound - Message when nothing matched.
+ * @param {(count: number, listing: string) => string} messages.ambiguous - Message when 2+ survive.
+ * @returns {object} The single matched row. Exits the process on 0 or 2+ matches.
+ */
+function resolveCandidates(matches, { notFound, ambiguous }) {
+  if (matches.length === 0) {
+    failWith(EXIT_NOT_FOUND, 'not-found', notFound);
+  }
+  if (matches.length > 1 && flags.role) {
+    const narrowed = matches.filter(r => roleFuzzyMatch(r.role, flags.role));
+    if (narrowed.length === 1) return narrowed[0];
+    // Fall through with the original list so the candidates stay visible.
+  }
+  if (matches.length > 1) {
+    const candidates = matches.map(r => ({ num: r.num, company: r.company, role: r.role }));
+    const listing = candidates.map(c => `#${c.num}\t${c.company}\t${c.role}`).join('\n');
+    failWith(EXIT_AMBIGUOUS, 'ambiguous', ambiguous(matches.length, listing), { candidates });
+  }
+  return matches[0];
+}
+
+/**
  * Find the tracker row matching the CLI selector.
  *
  * @param {object[]} rows - Parsed data rows (parseTrackerRow output + lineIdx).
@@ -249,105 +274,53 @@ function resolveRow(rows) {
   // caller reading a report filename actually has in hand.
   if (flags.report !== null) {
     const num = parseInt(flags.report, 10);
-    const matches = rows.filter(r => extractTrackerReportNumbers(r.report).includes(num));
-    if (matches.length === 0) {
-      failWith(EXIT_NOT_FOUND, 'not-found',
-        `No tracker row links report #${num}. (Report IDs and tracker row IDs differ — ` +
-        'use --row N to select by tracker #.)');
-    }
-    if (matches.length > 1 && flags.role) {
-      const narrowed = matches.filter(r => roleFuzzyMatch(r.role, flags.role));
-      if (narrowed.length === 1) return narrowed[0];
-    }
-    if (matches.length > 1) {
-      const candidates = matches.map(r => ({ num: r.num, company: r.company, role: r.role }));
-      const listing = candidates.map(c => `#${c.num}\t${c.company}\t${c.role}`).join('\n');
-      failWith(EXIT_AMBIGUOUS, 'ambiguous',
-        `Report #${num} is linked by ${matches.length} tracker rows — pass --role to disambiguate:\n${listing}`,
-        { candidates });
-    }
-    return matches[0];
+    return resolveCandidates(
+      rows.filter(r => extractTrackerReportNumbers(r.report).includes(num)),
+      {
+        notFound: `No tracker row links report #${num}. (Report IDs and tracker row IDs differ — ` +
+          'use --row N to select by tracker #.)',
+        ambiguous: (count, listing) =>
+          `Report #${num} is linked by ${count} tracker rows — pass --role to disambiguate:\n${listing}`,
+      },
+    );
   }
 
   // --row N and a bare numeric selector both match the # column; they differ
   // only in whether the mismatch guard below treats the number as ambiguous.
   if (flags.row !== null || isBareNumericSelector) {
     const num = parseInt(flags.row !== null ? flags.row : selector, 10);
-    let matches = rows.filter(r => r.num === num);
-    if (matches.length === 0) {
-      failWith(EXIT_NOT_FOUND, 'not-found', `No tracker row with #${num}`);
-    }
-    if (matches.length > 1 && flags.role) {
-      const narrowed = matches.filter(r => roleFuzzyMatch(r.role, flags.role));
-      if (narrowed.length === 1) return narrowed[0];
-      // Fall through with the original list so the candidates stay visible.
-    }
-    if (matches.length > 1) {
-      // A bare report number should never match more than one row — this is
-      // exactly the failure mode from #1704: a stale tracker # reused across
-      // 2+ rows means "the first match" is a silent coin flip on which
-      // company gets edited. Refuse to guess; require --role or the company
-      // selector instead.
-      const candidates = matches.map(r => ({ num: r.num, company: r.company, role: r.role }));
-      const listing = candidates.map(c => `#${c.num}\t${c.company}\t${c.role}`).join('\n');
-      failWith(EXIT_AMBIGUOUS, 'ambiguous',
-        `#${num} is a duplicate tracker number shared by ${matches.length} rows (see #1704) — pass --role to disambiguate, or use the company name instead:\n${listing}`,
-        { candidates });
-    }
-    return matches[0];
+    return resolveCandidates(
+      rows.filter(r => r.num === num),
+      {
+        notFound: `No tracker row with #${num}`,
+        // #1704: a stale tracker # reused across 2+ rows means "the first
+        // match" is a silent coin flip on which company gets edited. Refuse to
+        // guess; require --role or the company selector instead.
+        ambiguous: (count, listing) =>
+          `#${num} is a duplicate tracker number shared by ${count} rows (see #1704) — ` +
+          `pass --role to disambiguate, or use the company name instead:\n${listing}`,
+      },
+    );
   }
 
   const key = normalizeCompany(selector);
   if (!key) failUsage(`Selector "${selector}" is empty after normalization`);
-  let matches = rows.filter(r => normalizeCompany(r.company) === key);
-
-  if (matches.length === 0) {
-    failWith(EXIT_NOT_FOUND, 'not-found', `No tracker row with company matching "${selector}"`);
-  }
-  if (matches.length > 1 && flags.role) {
-    const narrowed = matches.filter(r => roleFuzzyMatch(r.role, flags.role));
-    if (narrowed.length === 1) return narrowed[0];
-    // Fall through with the original list so the candidates stay visible.
-  }
-  if (matches.length > 1) {
-    const candidates = matches.map(r => ({ num: r.num, company: r.company, role: r.role }));
-    const listing = candidates.map(c => `#${c.num}\t${c.company}\t${c.role}`).join('\n');
-    failWith(EXIT_AMBIGUOUS, 'ambiguous',
-      `Company "${selector}" matches ${matches.length} rows — pass the # or narrow with --role:\n${listing}`,
-      { candidates });
-  }
-  return matches[0];
+  return resolveCandidates(
+    rows.filter(r => normalizeCompany(r.company) === key),
+    {
+      notFound: `No tracker row with company matching "${selector}"`,
+      ambiguous: (count, listing) =>
+        `Company "${selector}" matches ${count} rows — pass the # or narrow with --role:\n${listing}`,
+    },
+  );
 }
 
 // ── locked read-modify-write ─────────────────────────────────────
 
-// Dry-run never writes, so it must not hold the exclusive lock: a read-only
-// preview should not block (or be blocked by) merge-tracker or another
-// set-status writer. A stale read is acceptable for a preview.
-let lock = null;
-if (!flags.dryRun) {
-  try {
-    lock = await acquireTrackerLock(trackerLockDirFor(APPS_FILE), {
-      timeoutMs: Number(process.env.CAREER_OPS_TRACKER_LOCK_TIMEOUT_MS) || 60_000,
-      retryMs: Number(process.env.CAREER_OPS_TRACKER_LOCK_RETRY_MS) || 75,
-      staleMs: Number(process.env.CAREER_OPS_TRACKER_LOCK_STALE_MS) || 10 * 60_000,
-      tracker: APPS_FILE,
-    });
-  } catch (err) {
-    // Exit 4 means "lock is busy — retry later" and must stay reserved for
-    // the actual timeout. Filesystem/configuration failures (EACCES on the
-    // lock dir, unwritable owner.json, …) are not retryable and fail as a
-    // config error instead.
-    if (err?.code === 'LOCK_TIMEOUT') {
-      failWith(EXIT_LOCK_TIMEOUT, 'lock-timeout', err.message);
-    }
-    failWith(EXIT_USAGE, 'lock-error', `Cannot acquire tracker lock: ${err.message}`);
-  }
-}
-// Safety net: failWith/failUsage/resolveRow call process.exit() directly and
-// skip the explicit release below. release() is idempotent, so both firing
-// on the happy path is fine.
-if (lock) process.once('exit', () => lock.release());
+// Shared with mark-pdf-ready.mjs (tracker-utils.mjs): dry-run never writes,
+// so it must not hold the exclusive lock — a read-only preview should not
+// block (or be blocked by) merge-tracker or another writer.
+const lock = await acquireTrackerLockForCli(APPS_FILE, { dryRun: flags.dryRun, failWith });
 
 let content;
 try {

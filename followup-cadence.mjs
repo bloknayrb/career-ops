@@ -91,6 +91,10 @@ const ALIASES = {
   'respondido': 'responded',
   'entrevista': 'interview',
   'oferta': 'offer',
+  // Hired aliases from templates/states.yml — without these, an "Accepted" or
+  // "Contratado" row normalizes to itself, so stats/funnel/company-history
+  // consumers looking for 'hired' silently drop the best outcome in the tracker.
+  'contratado': 'hired', 'contratada': 'hired', 'accepted': 'hired', 'accept': 'hired',
   'rechazado': 'rejected', 'rechazada': 'rejected',
   'descartado': 'discarded', 'descartada': 'discarded',
   'cerrada': 'discarded', 'cancelada': 'discarded',
@@ -112,7 +116,14 @@ function today() {
 
 export function parseDate(dateStr) {
   if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr.trim())) return null;
-  return new Date(dateStr.trim());
+  const s = dateStr.trim();
+  const d = new Date(s);
+  // Reject impossible calendar dates (2026-13-45, 2026-02-31): they match the
+  // regex but produce an Invalid Date, which is TRUTHY — without this check it
+  // slips through `if (!date)` guards and addDays().toISOString() throws,
+  // killing the whole analysis over one bad row.
+  if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== s) return null;
+  return d;
 }
 
 // The tracker `date` column is often the evaluation date, while the real
@@ -195,6 +206,10 @@ export function daysBetween(d1, d2) {
 }
 
 export function addDays(date, days) {
+  // Null-safe: parseDate() returns null for unparseable/impossible dates —
+  // degrade to "no scheduled date" instead of crashing (new Date(null) would
+  // silently be the 1970 epoch).
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return null;
   const result = new Date(date);
   result.setUTCDate(result.getUTCDate() + days);
   return result.toISOString().split('T')[0];
@@ -216,31 +231,58 @@ function parseTrackerContent(content) {
 }
 
 // --- Parse follow-ups.md ---
-// Table rows only (lines starting with `|`); pin-directive lines (`- next #...`)
-// and the header/separator rows are excluded — the header's `num` cell isn't
-// numeric and the separator's dashes aren't either, so both fail the `isNaN`
-// check below and never enter `entries`.
+// Two formats coexist in the log (both append-only):
+//   1. Table rows:  | num | appNum | date | company | role | channel | contact | notes |
+//   2. Legacy bullets written by early web builds: `- YYYY-MM-DD · #NUM Company — note`
+// Bullets carry no channel/contact/role (mapped to Other/''/''), and bullets
+// without a `#NUM` are skipped — they can't be attributed to an application.
+// Pin-directive lines (`- next #...`) and the header/separator rows are also
+// excluded — the header's `num` cell isn't numeric and the separator's dashes
+// aren't either, so both fail the `isNaN` check below and never enter `entries`.
+const BULLET_RE = /^-\s+(\d{4}-\d{2}-\d{2})\s+·\s+#(\d+)\s+(.+?)(?:\s+—\s+(.*))?$/;
+
 export function parseFollowups(content) {
   const entries = [];
   for (const line of String(content ?? '').split('\n')) {
-    if (!line.startsWith('|')) continue;
-    const parts = line.split('|').map(s => s.trim());
-    if (parts.length < 8) continue;
-    const num = parseInt(parts[1]);
-    if (isNaN(num)) continue;
+    if (line.startsWith('|')) {
+      const parts = line.split('|').map(s => s.trim());
+      if (parts.length < 8) continue;
+      const num = parseInt(parts[1]);
+      if (isNaN(num)) continue;
+      const appNum = parseInt(parts[2]);
+      if (isNaN(appNum)) continue; // unattributable row would poison per-app grouping
+      entries.push({
+        num,
+        appNum,
+        date: parts[3],
+        company: parts[4],
+        role: parts[5],
+        channel: parts[6],
+        contact: parts[7],
+        notes: parts[8] || '',
+      });
+      continue;
+    }
+    const m = line.match(BULLET_RE);
+    if (!m) continue;
     entries.push({
-      num,
-      appNum: parseInt(parts[2]),
-      date: parts[3],
-      company: parts[4],
-      role: parts[5],
-      channel: parts[6],
-      contact: parts[7],
-      notes: parts[8] || '',
+      num: null,
+      appNum: parseInt(m[2]),
+      date: m[1],
+      company: m[3],
+      role: '',
+      channel: 'Other',
+      contact: '',
+      notes: m[4] || '',
     });
   }
   return entries;
 }
+
+// `parseFollowups` is the disk-agnostic content parser upstream/main and its
+// callers use internally (analyzeFromContent, external scripts); the branch's
+// test-all.mjs imports it as `parseFollowupsContent`. Same function, two names.
+export { parseFollowups as parseFollowupsContent };
 
 // --- Next-date overrides (pins) ---
 // A user can PIN an application's next follow-up date, taking precedence over
@@ -248,9 +290,19 @@ export function parseFollowups(content) {
 // follow-up logged on/after the pin's set-date resumes the normal schedule.
 // Stored in data/follow-ups.md as directive lines:
 //   - next #42 2026-07-10 (set 2026-07-02)
+//   - next #42 2026-07-10 (set 2026-07-02) — why the date was pinned
 // The `(set …)` part records when the pin was made; if omitted (hand-written)
 // it defaults to the pinned date itself. The LAST pin line per application wins.
-const OVERRIDE_RE = /^-\s+next\s+#(\d+)\s+(\d{4}-\d{2}-\d{2})(?:\s+\(set\s+(\d{4}-\d{2}-\d{2})\))?\s*$/i;
+//
+// A trailing `— note` is accepted and ignored. Pins are written by hand as
+// often as by `followup-seed.mjs`, and a hand-written pin almost always wants
+// to record WHY the date moved. Anchoring the pattern immediately after the
+// `(set …)` group made every annotated pin fail to match — silently, since a
+// non-matching line is indistinguishable from an ordinary bullet. The failure
+// mode is the dangerous direction: the pin vanishes, the computed cadence
+// takes over, and the application reports overdue when the user had
+// explicitly deferred it.
+const OVERRIDE_RE = /^-\s+next\s+#(\d+)\s+(\d{4}-\d{2}-\d{2})(?:\s+\(set\s+(\d{4}-\d{2}-\d{2})\))?(?:\s*[—–-].*)?\s*$/i;
 
 export function parseNextOverrides(content) {
   const byApp = new Map();
@@ -271,6 +323,48 @@ export function resolveNextOverride(override, lastFollowupDate) {
   if (!override) return null;
   if (lastFollowupDate && lastFollowupDate > override.setDate) return null;
   return override.date;
+}
+
+// --- Retire directives ---
+// Not every application has a reachable human behind it. A cold ATS submission
+// with no contact on file has no follow-up channel at all, yet the cadence
+// keeps reporting it overdue every week forever. A dashboard whose overdue
+// count is mostly un-actionable rows trains the user to stop reading it, which
+// costs far more than the rows themselves.
+//
+// A retire directive drops ONE application out of the cadence:
+//   - cleared #42 2026-08-04 — no contact on file, no warm path
+// The date records when the retirement was made. This closes the follow-up
+// loop only — it does NOT close the application. The tracker row keeps its
+// status and any inbound reply is still caught by reply-watch.
+//
+// Like a pin, a retirement is revoked by a follow-up logged after it, so
+// re-engaging a retired application resumes its normal cadence with no
+// bookkeeping. The LAST directive per application wins, and a retirement
+// outranks a pin on the same application: retiring is the more explicit
+// "stop surfacing this", and reviving it is a one-line edit either way.
+const CLEARED_RE = /^-\s+cleared\s+#(\d+)\s+(\d{4}-\d{2}-\d{2})(?:\s*[—–-].*)?\s*$/i;
+
+export function parseClearedDirectives(content) {
+  const byApp = new Map();
+  for (const line of String(content ?? '').split('\n')) {
+    const m = line.match(CLEARED_RE);
+    if (!m) continue;
+    const setDate = m[2];
+    if (!parseDate(setDate)) continue; // an impossible date never poisons the analysis
+    const appNum = parseInt(m[1]);
+    byApp.set(appNum, { appNum, setDate });
+  }
+  return byApp;
+}
+
+// Mirrors resolveNextOverride's revival rule, including the same-day tie:
+// "log a final follow-up, then retire" is the common flow, so a follow-up
+// dated the same day as the retirement does not undo it.
+export function isRetired(cleared, lastFollowupDate) {
+  if (!cleared) return false;
+  if (lastFollowupDate && lastFollowupDate > cleared.setDate) return false;
+  return true;
 }
 
 // --- Extract contacts from notes ---
@@ -412,6 +506,10 @@ export function resolveReportPath(reportField, appsFile = APPS_FILE, repoRoot = 
 }
 
 // --- Compute urgency ---
+// For responded/interview, logged follow-ups CLEAR the overdue state and the
+// clock restarts from the last touch (re-overdue every responded_subsequent
+// days) — matching the cadence table in modes/followup.md ("Responded: every
+// 3 days · Interview: thank-you, then every 3 days, no limit").
 export function computeUrgency(status, daysSinceApp, daysSinceLastFollowup, followupCount) {
   if (status === 'applied') {
     if (followupCount >= CADENCE.applied_max_followups) return 'cold';
@@ -420,13 +518,18 @@ export function computeUrgency(status, daysSinceApp, daysSinceLastFollowup, foll
     return 'waiting';
   }
   if (status === 'responded') {
+    if (daysSinceLastFollowup !== null) {
+      return daysSinceLastFollowup >= CADENCE.responded_subsequent ? 'overdue' : 'waiting';
+    }
     if (daysSinceApp < CADENCE.responded_initial) return 'urgent';
     if (daysSinceApp >= CADENCE.responded_subsequent) return 'overdue';
     return 'waiting';
   }
   if (status === 'interview') {
-    if (daysSinceApp >= CADENCE.interview_thankyou) return 'overdue';
-    return 'waiting';
+    if (daysSinceLastFollowup !== null) {
+      return daysSinceLastFollowup >= CADENCE.responded_subsequent ? 'overdue' : 'waiting';
+    }
+    return daysSinceApp >= CADENCE.interview_thankyou ? 'overdue' : 'waiting';
   }
   return 'waiting';
 }
@@ -444,6 +547,9 @@ export function computeNextFollowupDate(status, appDate, lastFollowupDate, follo
     return addDays(parseDate(appDate), CADENCE.responded_initial);
   }
   if (status === 'interview') {
+    // After the thank-you is logged, subsequent touches follow the responded
+    // cadence (modes/followup.md: "Every 3 days · No limit").
+    if (lastFollowupDate) return addDays(parseDate(lastFollowupDate), CADENCE.responded_subsequent);
     return addDays(parseDate(appDate), CADENCE.interview_thankyou);
   }
   return null;
@@ -466,6 +572,7 @@ export function analyzeFromContent(trackerContent, followupsContent = '') {
 
   const followups = parseFollowups(followupsContent);
   const overrides = parseNextOverrides(String(followupsContent ?? ''));
+  const cleared = parseClearedDirectives(followupsContent);
 
   // Group follow-ups by app number
   const followupsByApp = new Map();
@@ -492,12 +599,13 @@ export function analyzeFromContent(trackerContent, followupsContent = '') {
     const appFollowups = followupsByApp.get(app.num) || [];
     const followupCount = appFollowups.length;
 
-    // Find most recent follow-up
+    // Find most recent follow-up (sorted date-desc; also exposed per entry so
+    // the web dashboard can render history without a second parser).
     let lastFollowupDate = null;
     let daysSinceLastFollowup = null;
-    if (appFollowups.length > 0) {
-      const sorted = appFollowups.sort((a, b) => (a.date > b.date ? -1 : 1));
-      lastFollowupDate = sorted[0].date;
+    const sortedFollowups = [...appFollowups].sort((a, b) => (a.date > b.date ? -1 : 1));
+    if (sortedFollowups.length > 0) {
+      lastFollowupDate = sortedFollowups[0].date;
       const lastDate = parseDate(lastFollowupDate);
       if (lastDate) daysSinceLastFollowup = daysBetween(lastDate, now);
     }
@@ -512,6 +620,14 @@ export function analyzeFromContent(trackerContent, followupsContent = '') {
     if (nextOverride) {
       nextFollowupDate = nextOverride;
       urgency = daysBetween(parseDate(nextOverride), now) >= 0 ? 'overdue' : 'waiting';
+    }
+
+    // A retirement outranks a pin: it means "there is no channel here", which
+    // no computed or pinned date can make true.
+    const retired = isRetired(cleared.get(app.num), lastFollowupDate);
+    if (retired) {
+      urgency = 'retired';
+      nextFollowupDate = null;
     }
 
     const nextDate = nextFollowupDate ? parseDate(nextFollowupDate) : null;
@@ -541,6 +657,7 @@ export function analyzeFromContent(trackerContent, followupsContent = '') {
       daysSinceApplication: daysSinceApp,
       daysSinceLastFollowup,
       followupCount,
+      followups: sortedFollowups,
       urgency,
       nextFollowupDate,
       nextOverride,
@@ -552,22 +669,36 @@ export function analyzeFromContent(trackerContent, followupsContent = '') {
   const urgencyOrder = { urgent: 0, overdue: 1, waiting: 2, cold: 3 };
   entries.sort((a, b) => (urgencyOrder[a.urgency] ?? 9) - (urgencyOrder[b.urgency] ?? 9));
 
+  // Retired applications are counted but not listed — surfacing them in the
+  // entries array would defeat the point of retiring them, and the count keeps
+  // the retirement visible enough to be reconsidered.
+  const retiredCount = entries.filter(e => e.urgency === 'retired').length;
+  const active = entries.filter(e => e.urgency !== 'retired');
+
   const filtered = overdueOnly
-    ? entries.filter(e => e.urgency === 'overdue' || e.urgency === 'urgent')
-    : entries;
+    ? active.filter(e => e.urgency === 'overdue' || e.urgency === 'urgent')
+    : active;
 
   return {
     metadata: {
       analysisDate: now.toISOString().split('T')[0],
       totalTracked: apps.length,
-      actionable: entries.length,
-      overdue: entries.filter(e => e.urgency === 'overdue').length,
-      urgent: entries.filter(e => e.urgency === 'urgent').length,
-      cold: entries.filter(e => e.urgency === 'cold').length,
-      waiting: entries.filter(e => e.urgency === 'waiting').length,
+      actionable: active.length,
+      overdue: active.filter(e => e.urgency === 'overdue').length,
+      urgent: active.filter(e => e.urgency === 'urgent').length,
+      cold: active.filter(e => e.urgency === 'cold').length,
+      waiting: active.filter(e => e.urgency === 'waiting').length,
+      retired: retiredCount,
     },
     entries: filtered,
     cadenceConfig: CADENCE,
+    // The EFFECTIVE cadence above is defaults+profile overrides. Consumers that
+    // need to show what a value would be WITHOUT the user's override (the web
+    // settings form's placeholder) need the pure defaults too — sourcing that
+    // placeholder from cadenceConfig would render a user's own override as the
+    // default they'd be reverting to. Emitting both is what lets the web stop
+    // hand-copying DEFAULT_CADENCE (#2369).
+    cadenceDefaults: DEFAULT_CADENCE,
   };
 }
 
@@ -625,15 +756,30 @@ function printSummary(result) {
   console.log('');
 }
 
+// ── CLI flags + help ────────────────────────────────────────────────
+
+const KNOWN_FLAGS = ['--summary', '--overdue-only', '--applied-days', '--help', '-h'];
+
+const USAGE = `Usage:
+  node followup-cadence.mjs                    # full JSON analysis to stdout
+  node followup-cadence.mjs --summary          # human-readable dashboard
+  node followup-cadence.mjs --overdue-only     # only show overdue/urgent entries
+  node followup-cadence.mjs --applied-days 10  # override applied_first cadence (days)
+  node followup-cadence.mjs --help|-h          # print this usage block and exit`;
+
 // --- Run (CLI only; guarded so the module is safely importable for tests) ---
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const result = analyze();
-
-  if (summaryMode) {
-    printSummary(result);
+  if (args.includes('--help') || args.includes('-h')) {
+    console.log(USAGE);
   } else {
-    console.log(JSON.stringify(result, null, 2));
-  }
+    const result = analyze();
 
-  if (result.error) process.exit(1);
+    if (summaryMode) {
+      printSummary(result);
+    } else {
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    if (result.error) process.exit(1);
+  }
 }

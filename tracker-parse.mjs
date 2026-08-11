@@ -356,5 +356,46 @@ export function extractTrackerReportNumbers(reportCell) {
  * @returns {string} Case-folded, punctuation-free, script-preserving key.
  */
 export function normalizeVia(name) {
-  return String(name).normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+  return normalizeTextKey(name);
+}
+
+/**
+ * Unicode-aware grouping key for any free-text tracker/report field.
+ *
+ * Same rule as normalizeVia(), generalized because Via is not the only field
+ * keyed this way: verify-pipeline groups tracker rows and report files by
+ * company+role with the same [a-z0-9] strip, so for a non-Latin pipeline every
+ * company keys to '' and every role keys to '' — three unrelated 株式会社X all
+ * land in one "possible duplicates" cluster (#2393). Keep letters and digits of
+ * any script; NFKC first so full-width/half-width variants compare equal.
+ *
+ * Combining marks are kept too (\p{M}): NFKC composes Latin diacritics into
+ * single code points, but Indic matras have no precomposed form, so stripping
+ * marks would make Devanagari कंपनी and कपनी — or क and का — the same key and
+ * re-introduce the exact collision this function exists to prevent.
+ *
+ * This is the one key every grouping consumer should share, so company/role
+ * identity cannot drift between scripts the way Via identity did.
+ *
+ * `separator` exists because not every consumer wants a solid key: scan.mjs
+ * keys role titles as space-separated words so "engineer (senior)" and
+ * "engineer, senior" collapse without "data engineer" and "dataengineer"
+ * merging. Passing ' ' keeps that shape while sharing this exact rule, so a
+ * second private [a-z0-9] strip never has to exist to get it.
+ *
+ * @param {string} value - Raw cell value (company, role, agency, slug, …).
+ * @param {string} [separator=''] - Replacement for each run of stripped chars.
+ *   Passed straight to String.replace, so `$` is special ('$&' would re-insert
+ *   the stripped run). Callers should pass a literal such as '' or ' '.
+ * @returns {string} Case-folded, punctuation-free, script-preserving key.
+ */
+export function normalizeTextKey(value, separator = '') {
+  // `value ?? ''` rather than String(value): a null/undefined cell must key to
+  // '' like any other empty field, not to the literal strings "null"/"undefined"
+  // — which would compare equal to each other and form a bogus group.
+  return String(value ?? '')
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{M}\p{N}]+/gu, separator)
+    .trim();
 }
