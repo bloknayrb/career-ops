@@ -126,3 +126,20 @@ modes/bk-upwork.md
 # Agent worktree scratch. Full repo checkouts left behind by subagent isolation;
 # tracked files only, but there is no reason for them to ever be staged.
 .claude/worktrees/
+
+# Codex CLI local config. config.toml carries a plaintext MCP API key in
+# [mcp_servers.*.env], and `origin` is a PUBLIC fork — this must never be staged.
+.codex/
+
+# User-layer triage brief. doctor.mjs auto-copies it from modes/_brief.template.md,
+# same as _profile.md / _custom.md above; tracking it would also orphan-flag in
+# validate-system-paths-coverage.mjs.
+modes/_brief.md
+
+# Outreach drafts naming real people. Same reasoning as recruiter-outreach.md.
+linkedin_post_reachout.md
+
+# Report-workflow scratch: discarded reservations and stale-sentinel leftovers.
+# reports/*.md is already ignored, but neither of these matches that pattern.
+reports/.discarded/
+reports/_stale_*
