@@ -412,6 +412,12 @@ export const USER_PATHS = [
   'opencode.json',
   '.claude/settings.json',
   '.claude/hooks/',
+  // Fork-local: generate-pdf.mjs imports it, but it does not exist upstream.
+  // USER_PATHS (never touched), not SYSTEM_PATHS (fetched from upstream) —
+  // registering it here is what stops validate-system-paths-coverage.mjs
+  // flagging it as an orphan without asking the updater to fetch a file the
+  // remote has never heard of.
+  'pdf-config.mjs',
 ];
 
 function parseVersionFile(raw) {

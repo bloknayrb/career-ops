@@ -33,9 +33,15 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'fs';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { randomUUID } from 'node:crypto';
 import { readStyleTokens, injectThemeStyle } from './theme-style.mjs';
+import {
+  PDF_PAGE_MARGIN,
+  PDF_MARGIN_OVERRIDDEN,
+  PDF_PAGE_MARGIN_DEFAULT,
+  captureRenderedBodyText,
+  assertPdfContentCoverage,
+} from './pdf-config.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const PDF_PAGE_MARGIN = '0.6in';
 
 // Ensure output directory exists (fresh setup)
 mkdirSync(resolve(__dirname, 'output'), { recursive: true });
@@ -613,7 +619,7 @@ export async function renderHtmlToPdf(html, outputPath, opts = {}) {
   // Write HTML to a temp file in baseDir so page.goto() gives a file://
   // origin that can load local images, fonts, and other resources.
   const tmpHtmlPath = resolve(baseDir, `.career-ops-render-${randomUUID()}.html`);
-  const { writeFile, unlink } = await import('fs/promises');
+  const { writeFile, unlink, rename } = await import('fs/promises');
   await writeFile(tmpHtmlPath, html, 'utf-8');
 
   const launchBrowser = opts.launchBrowser || ((options) => chromium.launch(options));
@@ -651,6 +657,11 @@ export async function renderHtmlToPdf(html, outputPath, opts = {}) {
     // Wait for fonts and images to settle
     await page.evaluate(() => document.fonts.ready);
 
+    // Capture the rendered document's full text so the coverage check below can
+    // verify every character of it survived into the PDF (clipped content must
+    // fail loudly).
+    const renderedBody = await captureRenderedBodyText(page);
+
     // Generate PDF
     const pdfBuffer = await page.pdf({
       printBackground: true,
@@ -663,22 +674,51 @@ export async function renderHtmlToPdf(html, outputPath, opts = {}) {
       preferCSSPageSize: true,
     });
 
-    // Write PDF
-    await writeFile(outputPath, pdfBuffer);
+    // Write to a temp path first and promote only after the content check
+    // passes. Writing straight to outputPath meant a failed run left the bad
+    // PDF sitting where the good one used to be, while data/pdf-index.tsv was
+    // never updated — leaving the manifest pointing at a clipped artifact.
+    const tmpPdfPath = `${outputPath}.tmp-${randomUUID()}.pdf`;
+    await writeFile(tmpPdfPath, pdfBuffer);
+
+    let coverage;
+    try {
+      coverage = await assertPdfContentCoverage(tmpPdfPath, renderedBody);
+    } catch (err) {
+      await unlink(tmpPdfPath).catch(() => {});
+      throw err;
+    }
+
+    // Promote: the check either passed or explicitly did not run.
+    await rename(tmpPdfPath, outputPath);
 
     // Read the root page-tree count so page-like text in streams is ignored.
+    // countRenderedPdfPages, not pdf-config's readPdfPageCount: this is the
+    // upstream helper, and generate-pdf.mjs is a system file the updater
+    // overwrites — every avoidable divergence is another reconciliation.
     const pageCount = countRenderedPdfPages(pdfBuffer);
 
-    // Strict overflow leaves the draft on disk but stops before success logs
-    // and manifest publication. Default overflow warns and continues.
+    // Strict overflow leaves the promoted draft on disk but stops before
+    // success logs and manifest publication. Default overflow warns and continues.
     enforcePageBudget(pageCount, {
       maxPages: opts.maxPages ?? 2,
       strictPages: opts.strictPages ?? false,
     });
 
-    console.log(`✅ PDF generated: ${outputPath}`);
+    // Never print an unqualified success for a check that did not run: a silent
+    // skip reading as a green tick is the exact regression this guards.
+    if (coverage.checked) {
+      console.log(`✅ PDF generated: ${outputPath}`);
+      console.log(`🧾 Content check: all rendered text present across ${coverage.numPages} PDF page(s)`);
+    } else {
+      console.log(`⚠️  PDF generated (content check SKIPPED): ${outputPath}`);
+      console.log(`⚠️  Content check skipped — ${coverage.reason}`);
+    }
     console.log(`📊 Pages: ${pageCount}`);
     console.log(`📦 Size: ${(pdfBuffer.length / 1024).toFixed(1)} KB`);
+    if (PDF_MARGIN_OVERRIDDEN) {
+      console.log(`📐 Margin: ${PDF_PAGE_MARGIN} (overridden via CAREER_OPS_PDF_MARGIN; default ${PDF_PAGE_MARGIN_DEFAULT})`);
+    }
 
     try {
       updatePDFManifest(reportNum, outputPath, inputPath, format);

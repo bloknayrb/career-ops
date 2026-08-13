@@ -35,6 +35,13 @@ modes/_profile.md
 # Secrets (never commit — use .env.example as template)
 .env
 
+# Timestamped backups of user-layer files. `cv.md` being ignored does NOT ignore
+# `cv.md.bak-<iso>` or `cv.md.bak10`, and those carry the same PII — one
+# `git add -A` from publication on a public fork.
+*.bak
+*.bak-*
+*.bak[0-9]*
+
 # Generated
 .resolved-prompt-*
 node_modules/
