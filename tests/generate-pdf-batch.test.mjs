@@ -38,6 +38,7 @@ writeFileSync(join(sandbox, 'data', 'pdf-index.tsv'), '', 'utf-8');
 
 copyFileSync(join(ROOT, 'generate-pdf.mjs'), script);
 copyFileSync(join(ROOT, 'theme-style.mjs'), join(sandbox, 'theme-style.mjs'));
+copyFileSync(join(ROOT, 'pdf-config.mjs'), join(sandbox, 'pdf-config.mjs'));
 
 const playwrightStub = join(sandbox, 'node_modules', 'playwright');
 mkdirSync(playwrightStub, { recursive: true });
