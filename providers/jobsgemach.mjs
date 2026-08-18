@@ -1,6 +1,8 @@
 // @ts-check
 /** @typedef {import('./_types.js').Provider} Provider */
 
+import { decodeEntities } from './_html-entities.mjs';
+
 // JobsGemach provider (jobsgemach.com) -- WordPress + WP Job Manager.
 //
 // The public board is JS-rendered ("JavaScript must be enabled to view
@@ -25,21 +27,18 @@ const REQUEST_HEADERS = {
   'accept': 'application/json',
 };
 
-function decodeEntities(s) {
-  return s
-    .replace(/<[^>]*>/g, '')
-    .replace(/&amp;/g, '&')
-    .replace(/&#8211;|&ndash;/g, '-')
-    .replace(/&#8217;|&rsquo;|&#039;|&apos;/g, "'")
-    .replace(/&#8220;|&#8221;|&quot;/g, '"')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/\s+/g, ' ')
+// Tag-stripping and whitespace collapse stay local; entity DECODING delegates
+// to the shared table. A private entity map is exactly the thing that drifts
+// out of sync with it, which is what the provider guard in the suite checks.
+function stripHtml(s) {
+  return decodeEntities(String(s).replace(/<[^>]*>/g, ''))
+    .replace(/s+/g, ' ')
     .trim();
 }
 
 // Best-effort "City, ST" from the opening of the description. Returns '' if none.
 function guessLocation(contentHtml) {
-  const text = decodeEntities(contentHtml || '');
+  const text = stripHtml(contentHtml || '');
   const m = text.match(/\b([A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){0,3}),\s*([A-Z]{2})\b/);
   return m ? `${m[1]}, ${m[2]}` : '';
 }
@@ -75,7 +74,7 @@ export default {
       if (!Array.isArray(batch) || batch.length === 0) break;
 
       for (const post of batch) {
-        const title = decodeEntities(post?.title?.rendered || '');
+        const title = stripHtml(post?.title?.rendered || '');
         const link = post?.link || '';
         if (!title || !link) continue;
         jobs.push({
