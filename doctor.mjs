@@ -17,7 +17,16 @@ import { parseConfigByExtension } from './jsonc-parse.mjs';
 import { validateFlags } from './lib/cli-flags.mjs';
 import { geminiNodeFloor } from './lib/gemini-node-floor.mjs';
 // Non-durable patch: see redline-check.mjs header. Re-add after a system update.
-import { checkGroundTruthFreshness as gtFreshness, scanBannedStrings } from './redline-check.mjs';
+// redline-check.mjs is gitignored — it is local-only by design, so it is absent
+// in CI and in a fresh clone. A STATIC import there takes all of doctor.mjs down
+// with ERR_MODULE_NOT_FOUND; load it lazily and let the two checks self-skip.
+let gtFreshness = null;
+let scanBannedStrings = null;
+try {
+  ({ checkGroundTruthFreshness: gtFreshness, scanBannedStrings } = await import('./redline-check.mjs'));
+} catch {
+  // Absent local module — the wrappers below report "skipped" instead.
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const argv = process.argv.slice(2);
@@ -535,6 +544,7 @@ function checkPlugins(root) {
 // ---------------------------------------------------------------------------
 
 function checkGroundTruthFreshness(root) {
+  if (!gtFreshness) return { pass: true, label: 'Ground Truth port: redline-check.mjs not present (skipped)' };
   const r = gtFreshness(root);
   if (r.status === 'stale') {
     return {
@@ -558,6 +568,7 @@ function checkGroundTruthFreshness(root) {
 }
 
 function checkBannedStrings(root) {
+  if (!scanBannedStrings) return { pass: true, label: 'Red-line scan: redline-check.mjs not present (skipped)' };
   const hits = scanBannedStrings(root);
   if (hits.length) {
     return {
