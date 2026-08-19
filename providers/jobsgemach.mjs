@@ -30,10 +30,19 @@ const REQUEST_HEADERS = {
 // Tag-stripping and whitespace collapse stay local; entity DECODING delegates
 // to the shared table. A private entity map is exactly the thing that drifts
 // out of sync with it, which is what the provider guard in the suite checks.
+//
+// Order matters: DECODE first, then strip. Stripping first leaves `&lt;script&gt;`
+// untouched and the decode turns it back into a live tag. And strip to a fixed
+// point, because one pass over `<scr<script>ipt>` reassembles a tag from the
+// remainder.
 function stripHtml(s) {
-  return decodeEntities(String(s).replace(/<[^>]*>/g, ''))
-    .replace(/s+/g, ' ')
-    .trim();
+  let text = decodeEntities(String(s));
+  let prev;
+  do {
+    prev = text;
+    text = text.replace(/<[^>]*>/g, '');
+  } while (text !== prev);
+  return text.replace(/\s+/g, ' ').trim();
 }
 
 // Best-effort "City, ST" from the opening of the description. Returns '' if none.
