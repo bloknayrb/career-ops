@@ -43,6 +43,10 @@ copyFileSync(join(ROOT, 'tracker-utils.mjs'), join(sandbox, 'tracker-utils.mjs')
 copyFileSync(join(ROOT, 'tracker-parse.mjs'), join(sandbox, 'tracker-parse.mjs'));
 copyFileSync(join(ROOT, 'tracker-aliases.json'), join(sandbox, 'tracker-aliases.json'));
 copyFileSync(join(ROOT, 'pipeline-lock.mjs'), join(sandbox, 'pipeline-lock.mjs'));
+// generate-pdf.mjs also imports the shared PDF margin/content-coverage config
+// (fork-local, #generate-pdf-margin-patch); copy it too or the isolated
+// script fails to load with ERR_MODULE_NOT_FOUND.
+copyFileSync(join(ROOT, 'pdf-config.mjs'), join(sandbox, 'pdf-config.mjs'));
 
 // theme-style.mjs and tracker-utils.mjs both `import * as yaml from 'js-yaml'`,
 // which resolves by walking up into the repo's node_modules -- from the
@@ -228,7 +232,12 @@ try {
     defaultOverflow.output.includes('CV is 3 pages') &&
     defaultOverflow.output.includes('allowed maximum is 2 pages') &&
     defaultOverflow.output.includes('--strict-pages') &&
-    defaultOverflow.output.includes('✅ PDF generated') &&
+    // Either success form: this sandbox renders through a playwright stub, so
+    // the fork's post-render content check has no text to verify and reports
+    // the skip instead of an unqualified ✅. Refusing to print ✅ for a check
+    // that did not run is the point of that check, so both forms are a pass.
+    (defaultOverflow.output.includes('✅ PDF generated') ||
+      defaultOverflow.output.includes('PDF generated (content check SKIPPED)')) &&
     defaultOverflow.output.includes('Manifest:') &&
     manifestHasPdf(defaultOverflowPdf)
   ) {

@@ -84,6 +84,7 @@ tmp/
 *.sync-conflict-*
 .fuse_hidden*
 .stfolder/
+.stignore
 batch/batch-runner.pid
 batch/.batch-state.lock/
 batch/*.bak
@@ -202,3 +203,4 @@ documents/*
 !documents/.gitkeep
 !documents/README.md
 data/intake-state.json
+data/agent-inbox.md

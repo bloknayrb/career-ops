@@ -742,6 +742,10 @@ try {
     for (const f of [
       'generate-pdf.mjs', 'theme-style.mjs', 'tracker-utils.mjs',
       'tracker-parse.mjs', 'tracker-aliases.json', 'pipeline-lock.mjs',
+      // generate-pdf.mjs also imports the shared PDF margin/content-coverage
+      // config (fork-local, #generate-pdf-margin-patch); copy it too or the
+      // isolated script fails to load with ERR_MODULE_NOT_FOUND.
+      'pdf-config.mjs',
     ]) {
       copyFileSync(join(ROOT, f), join(sandbox, f));
     }
@@ -871,6 +875,10 @@ export const chromium = {
     for (const f of [
       'generate-pdf.mjs', 'theme-style.mjs', 'tracker-utils.mjs',
       'tracker-parse.mjs', 'tracker-aliases.json', 'pipeline-lock.mjs',
+      // generate-pdf.mjs also imports the shared PDF margin/content-coverage
+      // config (fork-local, #generate-pdf-margin-patch); copy it too or the
+      // isolated script fails to load with ERR_MODULE_NOT_FOUND.
+      'pdf-config.mjs',
     ]) {
       copyFileSync(join(ROOT, f), join(sandbox, f));
     }

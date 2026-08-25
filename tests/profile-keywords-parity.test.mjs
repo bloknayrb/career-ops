@@ -22,24 +22,29 @@
 // strings for its caller's cleanChips to handle. The contract under test is
 // "the same keywords", not "the same post-processing".
 
-import { pass, fail, ROOT } from './helpers.mjs';
+import { pass, fail, warn, ROOT } from './helpers.mjs';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { pathToFileURL } from 'url';
 import * as yaml from 'js-yaml';
 import { profileTargetKeywords as core } from '../providers/_profile-keywords.mjs';
 
+console.log('\nprofile-keywords — web mirror vs core helper');
+
 // web/ is NOT in update-system.mjs's SYSTEM_PATHS but tests/ is, so this file
-// ships to installs whose checkout has no web/ at all. Import the mirror lazily
-// behind an existsSync guard — a static import cannot be skipped and turns a
-// core-only install into a permanent failure (#1675 / #1677).
+// ships to installs whose checkout has no web/ at all — and a static import
+// cannot be skipped, so it turns a core-only install into a permanent failure
+// (#1675 / #1677). Three branches, as in test-all.mjs's #2666 mirror-parity
+// freeze: an absent web/ is a real absence, but a mirror missing under a
+// present web/ is a move, and a skip is how a parity freeze quietly stops
+// guarding.
 const WEB_MIRROR = join(ROOT, 'web', 'src', 'lib', 'profile-keywords.mjs');
-if (!existsSync(WEB_MIRROR)) {
-  pass('web/ is not present in this checkout — profile-keywords parity not applicable');
+if (!existsSync(join(ROOT, 'web', 'src'))) {
+  warn('web/ not present in this checkout — skipping the profile-keywords parity check');
+} else if (!existsSync(WEB_MIRROR)) {
+  fail('web/ exists but web/src/lib/profile-keywords.mjs is missing — the parity check cannot verify (moved?)');
 } else {
   const { profileTargetKeywords: web } = await import(pathToFileURL(WEB_MIRROR).href);
-
-  console.log('\nprofile-keywords — web mirror vs core helper');
 
   // A true set comparison, not a length check: the core de-dupes and the mirror
   // does not, so a keyword appearing in both `primary` and an archetype name
@@ -96,5 +101,4 @@ if (!existsSync(WEB_MIRROR)) {
       fail(`threw on ${JSON.stringify(junk) ?? 'undefined'}: ${e.message}`);
     }
   }
-
 }
