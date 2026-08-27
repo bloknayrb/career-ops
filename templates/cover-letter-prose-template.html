@@ -89,16 +89,24 @@
     margin-bottom: 6.5pt;
   }
 
+  /* Hanging indent, NOT position:relative + position:absolute. A positioned
+     list item is painted in a later stacking phase, so Chrome emits its text
+     after the rest of the body in the PDF content stream. pdfjs reads that
+     stream in order, and assertPdfContentCoverage() needs the body text
+     contiguous, so the bullets extracted out of order failed the check and
+     reported the letter as clipped past the printable edge when nothing was
+     clipped. Keeping the marker in normal flow preserves document order. */
   .achievements li {
     margin-bottom: 4pt;
     padding-left: 14pt;
-    position: relative;
+    text-indent: -14pt;
   }
 
   .achievements li::before {
     content: "\2022";
-    position: absolute;
-    left: 0;
+    display: inline-block;
+    width: 14pt;
+    text-indent: 0;
   }
 
   .signoff {

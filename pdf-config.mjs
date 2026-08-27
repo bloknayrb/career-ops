@@ -73,11 +73,27 @@ export function normalizePdfText(text) {
  * both sides speak the same alphabet. It is applied to BOTH sides, so it can
  * never make absent content appear.
  *
+ * List markers are dropped for the same reason. A CSS-generated marker
+ * (`li::before { content: "\2022" }`, as in templates/cover-letter-template.html)
+ * is painted into the PDF's text layer but is absent from the DOM's innerText,
+ * which captureRenderedBodyText() uses to build the expected string. Because
+ * assertPdfContentCoverage() needs a CONTIGUOUS match, each injected marker
+ * splits the expected run and the check fails, reporting the letter as clipped
+ * when nothing was clipped at all. Any cover letter following modes/cover.md
+ * Step 8 (which mandates a bullet list) hit this. Stripped from BOTH sides, so
+ * it cannot make absent content appear — only a marker glyph becomes invisible
+ * to the comparison, and markers carry no content.
+ *
  * @param {string} text
  * @returns {string}
  */
+const LIST_MARKER_GLYPHS = /[•‣⁃▪●◦·▫∙]/g;
+
 export function squashPdfText(text) {
-  return normalizePdfText(text).normalize('NFKC').replace(/ /g, '');
+  return normalizePdfText(text)
+    .normalize('NFKC')
+    .replace(LIST_MARKER_GLYPHS, '')
+    .replace(/ /g, '');
 }
 
 /**
@@ -176,6 +192,42 @@ export async function readPdfPageCount(pdf) {
  * @param {{text: string, isRtl: boolean}} body - From captureRenderedBodyText().
  * @returns {Promise<{checked: boolean, reason?: string, numPages?: number}>}
  */
+/**
+ * Locate where the expected text stops matching the PDF's text layer.
+ *
+ * The coverage check is a contiguous substring match, so a single stray or
+ * missing character fails the whole letter with no clue which one. Without
+ * this, "content was clipped" is the only hypothesis on offer and the natural
+ * response is to cut the document until the message goes away — which does not
+ * fix a divergence that was never about length. Reports the longest expected
+ * prefix that still appears in the PDF, then the characters on each side of
+ * the break.
+ *
+ * @param {string} wanted - Squashed expected text (from the DOM).
+ * @param {string} got - Squashed text extracted from the PDF.
+ * @returns {string} Human-readable divergence report.
+ */
+export function describeCoverageDivergence(wanted, got) {
+  // Longest prefix of `wanted` that still occurs anywhere in `got`.
+  let lo = 0;
+  let hi = wanted.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (got.includes(wanted.slice(0, mid))) lo = mid;
+    else hi = mid - 1;
+  }
+  if (lo === 0) {
+    return 'Divergence: the PDF text layer shares no leading text with the rendered document.';
+  }
+  const at = got.indexOf(wanted.slice(0, lo)) + lo;
+  const ctx = 45;
+  return [
+    `Divergence after ${lo} of ${wanted.length} matched characters.`,
+    `  expected …${wanted.slice(Math.max(0, lo - ctx), lo)}[${wanted[lo] ?? '<end>'}]${wanted.slice(lo + 1, lo + ctx)}…`,
+    `  in PDF   …${got.slice(Math.max(0, at - ctx), at)}[${got[at] ?? '<end>'}]${got.slice(at + 1, at + ctx)}…`,
+  ].join('\n');
+}
+
 export async function assertPdfContentCoverage(pdfPath, body) {
   const wanted = squashPdfText(body?.text);
   if (!wanted) {
@@ -202,12 +254,14 @@ export async function assertPdfContentCoverage(pdfPath, body) {
     throw err;
   }
 
-  if (!squashPdfText(extracted.text).includes(wanted)) {
+  const got = squashPdfText(extracted.text);
+  if (!got.includes(wanted)) {
     throw new Error(
       `PDF content check failed: the generated PDF (${extracted.numPages} page(s)) is missing text ` +
       `that the rendered document contains. Content was likely clipped past the printable edge — ` +
       `check the page margin (currently ${PDF_PAGE_MARGIN}) against the document's own ` +
-      `height/positioning, especially any fixed-height or overflow:hidden container. PDF: ${pdfPath}`
+      `height/positioning, especially any fixed-height or overflow:hidden container. PDF: ${pdfPath}` +
+      `\n${describeCoverageDivergence(wanted, got)}`
     );
   }
   return { checked: true, numPages: extracted.numPages };
