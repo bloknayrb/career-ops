@@ -33,6 +33,7 @@ const RENDERED_TITLES = {
   SECTION_EDUCATION: 'Education',
   SECTION_CERTIFICATIONS: 'Certifications',
   SECTION_AWARDS: 'Awards & Honors',
+  SECTION_INTERESTS: 'Interests',
   SECTION_SKILLS: 'Skills',
 };
 
@@ -245,14 +246,14 @@ try {
   // Asserted against a written-out vocabulary, not against CV_SECTION_KEYS:
   // checking the message with the same list the message is built from would
   // pass however many sections the implementation actually knows about.
-  const EXPECTED_KEYS = ['summary', 'competencies', 'experience', 'projects', 'education', 'certifications', 'awards', 'skills'];
+  const EXPECTED_KEYS = ['summary', 'competencies', 'experience', 'projects', 'education', 'certifications', 'awards', 'interests', 'skills'];
   if (typo.warnings.some(w => EXPECTED_KEYS.every(k => w.includes(k)))) {
-    pass('the unrecognized-name warning lists all eight recognized section keys');
+    pass('the unrecognized-name warning lists all nine recognized section keys');
   } else {
     fail(`the warning should list the recognized keys: ${JSON.stringify(typo.warnings)}`);
   }
   if (EXPECTED_KEYS.every(k => CV_SECTION_KEYS.includes(k)) && CV_SECTION_KEYS.length === EXPECTED_KEYS.length) {
-    pass('CV_SECTION_KEYS is exactly the eight canonical sections the alias table produces');
+    pass('CV_SECTION_KEYS is exactly the nine canonical sections the alias table produces');
   } else {
     fail(`CV_SECTION_KEYS => ${JSON.stringify(CV_SECTION_KEYS)}`);
   }
@@ -655,10 +656,10 @@ try {
   // pass with the other six unreachable.
   const rendered = renderTemplate('cv-template.html');
   const shippedOrder = renderedTitles(rendered);
-  const allKeys = ['summary', 'competencies', 'experience', 'projects', 'education', 'certifications', 'awards', 'skills'];
+  const allKeys = ['summary', 'competencies', 'experience', 'projects', 'education', 'certifications', 'awards', 'interests', 'skills'];
   const reversed = renderedTitles(reorderCvSections(rendered, [...allKeys].reverse()));
-  if (shippedOrder.length === 8 && JSON.stringify(reversed) === JSON.stringify([...shippedOrder].reverse())) {
-    pass('every one of the shipped template\'s eight sections is movable (full reversal)');
+  if (shippedOrder.length === 9 && JSON.stringify(reversed) === JSON.stringify([...shippedOrder].reverse())) {
+    pass('every one of the shipped template\'s nine sections is movable (full reversal)');
   } else {
     fail(`shipped template reversal: before=${JSON.stringify(shippedOrder)} after=${JSON.stringify(reversed)}`);
   }
@@ -742,13 +743,21 @@ try {
     for (const f of [
       'generate-pdf.mjs', 'theme-style.mjs', 'tracker-utils.mjs',
       'tracker-parse.mjs', 'tracker-aliases.json', 'pipeline-lock.mjs',
-      // generate-pdf.mjs also imports the shared PDF margin/content-coverage
-      // config (fork-local, #generate-pdf-margin-patch); copy it too or the
-      // isolated script fails to load with ERR_MODULE_NOT_FOUND.
+      // FORK-LOCAL: this fork's generate-pdf.mjs imports pdf-config.mjs for the
+      // shared page margin and assertPdfContentCoverage. Upstream has no such
+      // module, so re-apply this entry whenever this file is reconciled.
       'pdf-config.mjs',
     ]) {
       copyFileSync(join(ROOT, f), join(sandbox, f));
     }
+    // generate-pdf.mjs resolves user-layer paths via path-resolver.mjs
+    // (CAREER_OPS_ROOT), so the fixture carries that too.
+    copyFileSync(join(ROOT, 'path-resolver.mjs'), join(sandbox, 'path-resolver.mjs'));
+    // generate-pdf.mjs's main-guard now lives in lib/is-main-module.mjs (#3170),
+    // so the copy needs it beside itself or it dies with ERR_MODULE_NOT_FOUND
+    // before parsing an argument.
+    mkdirSync(join(sandbox, 'lib'), { recursive: true });
+    copyFileSync(join(ROOT, 'lib', 'is-main-module.mjs'), join(sandbox, 'lib', 'is-main-module.mjs'));
 
     // theme-style.mjs and tracker-utils.mjs both `import * as yaml from
     // 'js-yaml'`, resolved by walking up into the repo's node_modules -- from
@@ -875,13 +884,21 @@ export const chromium = {
     for (const f of [
       'generate-pdf.mjs', 'theme-style.mjs', 'tracker-utils.mjs',
       'tracker-parse.mjs', 'tracker-aliases.json', 'pipeline-lock.mjs',
-      // generate-pdf.mjs also imports the shared PDF margin/content-coverage
-      // config (fork-local, #generate-pdf-margin-patch); copy it too or the
-      // isolated script fails to load with ERR_MODULE_NOT_FOUND.
+      // FORK-LOCAL: this fork's generate-pdf.mjs imports pdf-config.mjs for the
+      // shared page margin and assertPdfContentCoverage. Upstream has no such
+      // module, so re-apply this entry whenever this file is reconciled.
       'pdf-config.mjs',
     ]) {
       copyFileSync(join(ROOT, f), join(sandbox, f));
     }
+    // generate-pdf.mjs resolves user-layer paths via path-resolver.mjs
+    // (CAREER_OPS_ROOT), so the fixture carries that too.
+    copyFileSync(join(ROOT, 'path-resolver.mjs'), join(sandbox, 'path-resolver.mjs'));
+    // generate-pdf.mjs's main-guard now lives in lib/is-main-module.mjs (#3170),
+    // so the copy needs it beside itself or it dies with ERR_MODULE_NOT_FOUND
+    // before parsing an argument.
+    mkdirSync(join(sandbox, 'lib'), { recursive: true });
+    copyFileSync(join(ROOT, 'lib', 'is-main-module.mjs'), join(sandbox, 'lib', 'is-main-module.mjs'));
 
     // theme-style.mjs and tracker-utils.mjs both `import * as yaml from
     // 'js-yaml'`, resolved by walking up into the repo's node_modules -- from

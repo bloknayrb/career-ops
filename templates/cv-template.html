@@ -3,6 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- FORK-LOCAL: hyphen, not an em dash. modes/_profile.md's Red Lines ban em
+     dashes in candidate-facing output, and redline-check.mjs scans for them. -->
 <title>{{NAME}} - CV</title>
 <style>
   /* Themeable tokens (#1837): overridable via config/profile.yml `style:`, which
@@ -389,6 +391,12 @@
     width: 44px;
   }
 
+  /* === INTERESTS === */
+  .interests-line {
+    font-size: 10.5px;
+    color: #444;
+  }
+
   /* === SKILLS === */
   .skills-grid {
     display: flex;
@@ -692,6 +700,12 @@
   <div class="section">
     <div class="section-title">{{SECTION_AWARDS}}</div>
     <div class="award-table">{{AWARDS}}</div>
+  </div>
+
+  <!-- INTERESTS -->
+  <div class="section">
+    <div class="section-title">{{SECTION_INTERESTS}}</div>
+    <div class="interests-line">{{INTERESTS}}</div>
   </div>
 
   <!-- SKILLS -->
