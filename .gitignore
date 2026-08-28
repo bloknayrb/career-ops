@@ -204,3 +204,11 @@ documents/*
 !documents/README.md
 data/intake-state.json
 data/agent-inbox.md
+
+# fork-check.mjs — detects fork-local work that an update is about to destroy.
+# Same preservation mechanism as redline-check.mjs: untracked + absent from
+# SYSTEM_PATHS is the entire reason `apply` leaves it alone. Its highest-value
+# check derives the prune-exposed set mechanically (tracked ∩ allowlisted dir
+# prefix ∩ absent from upstream ∩ not in apply()'s preserved set), which is the
+# question a hand-maintained inventory keeps getting wrong.
+fork-check.mjs
