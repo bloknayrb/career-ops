@@ -101,6 +101,45 @@ output/.voice-lint/
 # tests/ file absent from upstream, so this must stay untracked to survive.
 tests/cover-letter-prose.test.mjs
 
+# The rest of the fork-owned PDF/cover-letter chain, untracked for the same
+# reason — and these were NOT safe before, they were only lucky.
+#
+# apply() PRESERVES a locally-modified system file, but preservation is ONE-SHOT:
+# the preserved file is held out of the update COMMIT by an :(exclude) pathspec,
+# so at the NEXT update it is byte-identical to the new baseline, drops out of
+# `atRisk = changedLocally ∩ differsFromUpstream`, and — being absent upstream —
+# gets pruned. The cycle is: pruned → restored by hand → now differs → preserved
+# → frozen → baseline resets → exposed → pruned again. These five were pruned at
+# v1.29.0, restored, preserved through v1.30.0, and `node fork-check.mjs` showed
+# them back in the exposed state for v1.31.0. Untracking breaks the cycle: the
+# prune spares untracked files unconditionally.
+#
+# v1.30.0's isReferencedByPreservedFile() does NOT rescue them — it only scans
+# preserved .html/.css for a basename, and the prose template is reached from a
+# .mjs. Nor does config/local-paths.txt: localUserPaths() rejects any path that
+# collides with a SYSTEM_PATHS entry, and templates/ and tests/ are both on it.
+# Untracked is the only mechanism left.
+templates/cover-letter-prose-template.html
+tests/pdf-content-check.test.mjs
+tests/fixtures/pdf-flow-fixture.html
+tests/fixtures/pdf-footer-fixture.html
+tests/fixtures/pdf-rtl-fixture.html
+
+# Two scanner providers upstream has REMOVED but portals.yml still routes to:
+# `provider: macher` and `provider: jobsgemach` in tracked_companies. Both are
+# absent from upstream and were therefore prune-bait; jobsgemach.mjs was in fact
+# deleted by the v1.30.0 apply on 2026-08-27 and restored from d8c98a8f^.
+# providers/_registry.mjs loads this directory by readdirSync, so a missing file
+# is not an import error anywhere — the provider just silently stops existing and
+# that portal quietly stops being scanned. Untracked is what keeps them.
+#
+# Careful: a plain repo-wide grep does NOT show these as "referenced". portals.yml
+# is user-layer and gitignored, so gitignore-respecting search tools skip it, and
+# both providers read as dead orphans. They are not. Check portals.yml explicitly
+# before concluding any provider is unused.
+providers/macher.mjs
+providers/jobsgemach.mjs
+
 # test-all.mjs copies the whole repo (including cv.md, article-digest.md,
 # voice-dna.md) into these scratch dirs and deletes them in a finally block. On
 # Windows that rm can fail with EPERM, stranding a full copy of the user layer in
