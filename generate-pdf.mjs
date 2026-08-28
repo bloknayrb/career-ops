@@ -39,8 +39,16 @@ import { readFile } from 'fs/promises';
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'fs';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { randomUUID } from 'node:crypto';
+import { getCareerOpsRoot } from './path-resolver.mjs';
 import { readStyleTokens, injectThemeStyle, readCvSectionOrder } from './theme-style.mjs';
 import { resolvePdfIndexPath, resolveTrackerPath, resolveWorkspaceRoot } from './tracker-utils.mjs';
+import { isMainModule } from './lib/is-main-module.mjs';
+// FORK-LOCAL: the shared page margin and the PDF content-coverage check. Upstream
+// hardcodes `const PDF_PAGE_MARGIN = '0.6in'` here and writes the PDF straight to
+// its destination with no verification that the rendered text survived into it.
+// This fork routes the margin through pdf-config.mjs (so generate-cover-letter
+// and generate-pdf cannot drift apart) and gates the write on coverage. Re-apply
+// this block by hand after every update — see `node fork-check.mjs`.
 import {
   PDF_PAGE_MARGIN,
   PDF_MARGIN_OVERRIDDEN,
@@ -50,7 +58,7 @@ import {
 } from './pdf-config.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const trackerPath = resolveTrackerPath(__dirname);
+const trackerPath = resolveTrackerPath(getCareerOpsRoot());
 const workspaceRoot = resolveWorkspaceRoot(trackerPath);
 
 // Canonical tracker workspace: realpath so a symlinked ancestor (e.g. macOS
@@ -266,6 +274,7 @@ const SECTION_ALIASES = new Map([
   ['awards & honours', 'awards'],
   ['skills', 'skills'],
   ['technical skills', 'skills'],
+  ['interests', 'interests'],
   // Polish — the vocabulary documented in modes/pl/README.md, plus the word-order
   // variants that turn up in practice (both "Kompetencje kluczowe" and
   // "Kluczowe kompetencje" are used for the same section).
@@ -1476,6 +1485,7 @@ export async function inlineLocalFonts(html) {
  *   baseDir?: string,
  *   reportNum?: string,
  *   inputPath?: string,
+ *   workspaceRoot?: string,
  *   maxPages?: number,
  *   strictPages?: boolean,
  *   launchBrowser?: (options: {headless: boolean}) => Promise<import('playwright').Browser>
@@ -1525,9 +1535,25 @@ export async function renderHtmlToPdf(html, outputPath, opts = {}) {
  */
 async function renderInPage(browser, html, outputPath, opts = {}) {
   const format = opts.format || 'a4';
-  const baseDir = opts.baseDir || process.cwd();
+  const outputRoot = opts.workspaceRoot || workspaceRoot;
+  const requestedBaseDir = resolve(opts.baseDir || outputRoot);
+  // Temporary HTML is an output too: never let an external input path or
+  // caller-supplied baseDir choose an arbitrary directory. If the requested
+  // directory is outside the tracker workspace (or escapes through a symlink),
+  // keep the render workspace-owned while still allowing the input itself to
+  // be read.
+  const baseDir = isWorkspaceOutputPath(
+    resolve(requestedBaseDir, '.career-ops-render-anchor'),
+    outputRoot,
+  ) ? requestedBaseDir : resolve(outputRoot);
   const reportNum = opts.reportNum || '';
   const inputPath = opts.inputPath || '';
+
+  // Reject an escaping destination before creating directories, launching
+  // Chromium, or writing any renderer temporary files (#2844).
+  if (!isWorkspaceOutputPath(outputPath, outputRoot)) {
+    throw new Error(`Refusing to write the PDF outside the tracker workspace: ${outputPath}`);
+  }
 
   mkdirSync(dirname(outputPath), { recursive: true });
 
@@ -1544,7 +1570,7 @@ async function renderInPage(browser, html, outputPath, opts = {}) {
   // Write HTML to a temp file in baseDir so page.goto() gives a file://
   // origin that can load local images, fonts, and other resources.
   const tmpHtmlPath = resolve(baseDir, `.career-ops-render-${randomUUID()}.html`);
-  const { writeFile, unlink, rename } = await import('fs/promises');
+  const { writeFile, unlink, rename } = await import('fs/promises'); // FORK-LOCAL: rename, for the coverage-gated promote below
   await writeFile(tmpHtmlPath, html, 'utf-8');
 
   let page = null;
@@ -1583,9 +1609,10 @@ async function renderInPage(browser, html, outputPath, opts = {}) {
     // Wait for fonts and images to settle
     await page.evaluate(() => document.fonts.ready);
 
-    // Capture the rendered document's full text so the coverage check below can
-    // verify every character of it survived into the PDF (clipped content must
-    // fail loudly).
+    // FORK-LOCAL: capture the rendered document's full text so the coverage check
+    // below can verify every character of it survived into the PDF. Clipped
+    // content must fail loudly rather than ship — the audited document and the
+    // shipped document have to be the same document.
     const renderedBody = await captureRenderedBodyText(page);
 
     // Generate PDF
@@ -1600,10 +1627,10 @@ async function renderInPage(browser, html, outputPath, opts = {}) {
       preferCSSPageSize: true,
     });
 
-    // Write to a temp path first and promote only after the content check
-    // passes. Writing straight to outputPath meant a failed run left the bad
-    // PDF sitting where the good one used to be, while data/pdf-index.tsv was
-    // never updated — leaving the manifest pointing at a clipped artifact.
+    // FORK-LOCAL: write to a temp path first and promote only after the content
+    // check passes. Writing straight to outputPath meant a failed run left the
+    // bad PDF sitting where the good one used to be, while data/pdf-index.tsv
+    // was never updated — leaving the manifest pointing at a clipped artifact.
     const tmpPdfPath = `${outputPath}.tmp-${randomUUID()}.pdf`;
     await writeFile(tmpPdfPath, pdfBuffer);
 
@@ -1628,8 +1655,9 @@ async function renderInPage(browser, html, outputPath, opts = {}) {
       strictPages: opts.strictPages ?? false,
     });
 
-    // Never print an unqualified success for a check that did not run: a silent
-    // skip reading as a green tick is the exact regression this guards.
+    // FORK-LOCAL: never print an unqualified success for a check that did not
+    // run. A silent skip reading as a green tick is the exact regression this
+    // guards — a green result is only evidence if a broken run looks different.
     if (coverage.checked) {
       console.log(`✅ PDF generated: ${outputPath}`);
       console.log(`🧾 Content check: all rendered text present across ${coverage.numPages} PDF page(s)`);
@@ -1736,7 +1764,7 @@ export async function renderBatch(entries, opts = {}) {
   }
 }
 
-const isMain = process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1]);
+const isMain = isMainModule(import.meta.url);
 if (isMain) {
   generatePDF().catch((err) => {
     console.error('❌ PDF generation failed:', err.message);

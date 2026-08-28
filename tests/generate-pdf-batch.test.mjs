@@ -49,9 +49,16 @@ copyFileSync(join(ROOT, 'tracker-utils.mjs'), join(sandbox, 'tracker-utils.mjs')
 copyFileSync(join(ROOT, 'tracker-parse.mjs'), join(sandbox, 'tracker-parse.mjs'));
 copyFileSync(join(ROOT, 'tracker-aliases.json'), join(sandbox, 'tracker-aliases.json'));
 copyFileSync(join(ROOT, 'pipeline-lock.mjs'), join(sandbox, 'pipeline-lock.mjs'));
-// generate-pdf.mjs also imports the shared PDF margin/content-coverage config
-// (fork-local, #generate-pdf-margin-patch); copy it too or the isolated
-// script fails to load with ERR_MODULE_NOT_FOUND.
+// generate-pdf.mjs resolves user-layer paths via path-resolver.mjs
+// (CAREER_OPS_ROOT), so the fixture carries that too.
+copyFileSync(join(ROOT, 'path-resolver.mjs'), join(sandbox, 'path-resolver.mjs'));
+// generate-pdf.mjs's main-guard lives in lib/is-main-module.mjs (#3170). Without
+// it the copy dies with ERR_MODULE_NOT_FOUND before parsing an argument.
+mkdirSync(join(sandbox, 'lib'), { recursive: true });
+copyFileSync(join(ROOT, 'lib', 'is-main-module.mjs'), join(sandbox, 'lib', 'is-main-module.mjs'));
+// FORK-LOCAL: this fork's generate-pdf.mjs imports pdf-config.mjs for the shared
+// page margin and assertPdfContentCoverage. Upstream has no such module, so this
+// line is re-applied by hand every time the file is reconciled after an update.
 copyFileSync(join(ROOT, 'pdf-config.mjs'), join(sandbox, 'pdf-config.mjs'));
 
 // theme-style.mjs and tracker-utils.mjs both `import * as yaml from 'js-yaml'`,
