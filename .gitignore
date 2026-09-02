@@ -214,7 +214,13 @@ interview-prep/sessions/*
 !interview-prep/sessions/README.md
 config/cv-facts.json
 config/benchmarks.yml
-config/local-paths.txt
+# config/local-paths.txt is deliberately TRACKED in this fork, not ignored.
+# It declares pdf-config.mjs, which upstream does not ship. While it was
+# ignored, CI checked out the repo without it, every declared path read as an
+# orphan there, and validate-system-paths-coverage.mjs was red on all three
+# platforms while passing locally — the exact loop upstream #2991 describes.
+# v1.31.0 excludes the declaration file from the coverage manifest so a fork
+# can commit it; do not re-add an ignore rule for it.
 .manifesto-noted
 config/plugins.yml
 plugins.local/
@@ -251,3 +257,33 @@ data/agent-inbox.md
 # prefix ∩ absent from upstream ∩ not in apply()'s preserved set), which is the
 # question a hand-maintained inventory keeps getting wrong.
 fork-check.mjs
+
+# Added by career-ops update-system.mjs.
+# System-owned ignore rules that were missing from this file. Your own rules
+# are never modified, reordered or removed: the updater only appends patterns
+# it cannot already find somewhere in this file. Reordering these lines, or
+# moving them elsewhere in the file, is safe and will not bring them back.
+# Deleting or commenting one out is not: they are system-owned, several of
+# them guard files holding personal data, and the next update re-adds any
+# that is no longer present as a live pattern.
+# The tracker's derived SQLite index (tracker.mjs, #918). It sits beside the
+# tracker markdown, so on the standard layout it lands in data/ and is already
+# covered by the rules above — but resolveTrackerPath() falls back to
+# `<root>/applications.md` when data/applications.md is absent, and the index
+# follows it there. That is the legacy install layout, and it is also every
+# fresh clone: `node test-all.mjs` leaves a 36KB applications.db in the repo
+# root, which `git add .` then stages.
+# Its content is the whole tracker — company, role, score, status, notes — so it
+# carries the same PII as the file it indexes, under a name none of the rules
+# above match. SQLite's -wal/-shm sidecars travel with it.
+# Deliberately not root-anchored. The index follows the tracker markdown, and
+# getCareerOpsRoot() resolves a relative CAREER_OPS_ROOT (or .career-ops-data
+# marker) against the codebase directory — so a data root configured as
+# `career-data` puts both inside the checkout, in neither of the two places an
+# anchored rule would cover. Nothing tracked in this repo ends in .db, and an
+# ignore rule cannot untrack a file that is already tracked, so the cost of the
+# wider glob is a `git add -f` on a .db fixture nobody has added yet; the cost
+# of the narrower one is this leak, for every non-default data root.
+*.db
+*.db-wal
+*.db-shm

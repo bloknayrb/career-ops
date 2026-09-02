@@ -55,7 +55,7 @@ const VALUE_FLAGS = ['--target', '--cli'];
 const USAGE = `Usage:
   node doctor.mjs                    # run the setup diagnostic
   node doctor.mjs --json             # machine-readable onboarding state
-  node doctor.mjs --strict           # also probe portals.yml ATS slugs (network)
+  node doctor.mjs --strict           # also probe portals.yml entries (network)
   node doctor.mjs --target <path>    # diagnose another career-ops checkout
   node doctor.mjs --cli <name>       # check a specific CLI's integration
   node doctor.mjs --help             # show this message
@@ -74,8 +74,8 @@ const targetIdx = argv.indexOf('--target');
 const projectRoot =
   targetIdx !== -1 && argv[targetIdx + 1] ? argv[targetIdx + 1] : getCareerOpsRoot();
 const JSON_OUT = argv.includes('--json');
-// --strict adds a live ATS-slug probe of portals.yml (network). Opt-in so the
-// default `npm run doctor` stays fast and fully offline.
+// --strict adds a live reachability probe of every portals.yml entry (network).
+// Opt-in so the default `npm run doctor` stays fast and fully offline.
 const STRICT = argv.includes('--strict');
 
 const cliIdx = argv.indexOf('--cli');
@@ -306,7 +306,15 @@ function isPlaywrightMcpFromPlugin() {
   return Object.entries(enabled).some(([key, on]) => {
     if (on !== true) return false;
     const entries = Array.isArray(installed[key]) ? installed[key] : [];
-    return entries.some(({ installPath } = {}) => {
+    // Read installPath off the entry rather than destructuring it: the `= {}`
+    // default only covers `undefined`, so a manifest carrying a literal `null`
+    // entry - valid JSON, and what a half-written install leaves behind - threw
+    // a TypeError here. That is worse than the miss this function was added to
+    // fix (#2752): doctor dies before printing, so every other check vanishes
+    // with it and the output looks like a broken install rather than one
+    // unconfigured plugin.
+    return entries.some((entry) => {
+      const installPath = entry?.installPath;
       if (typeof installPath !== 'string' || !installPath) return false;
       return hasPlaywrightIn(readConfigIfPresent(join(installPath, '.mcp.json')), { bare: true });
     });
@@ -444,17 +452,6 @@ const USER_LAYER_PREREQS = [
   },
 ];
 
-function prereqPresent(root, path) {
-  return existsSync(join(root, ...path.split('/')));
-}
-
-function checkPrereq({ path, fix }) {
-  if (prereqPresent(projectRoot, path)) {
-    return { pass: true, label: `${path} found` };
-  }
-  return { warn: true, label: `${path} not found (user setup required)`, fix };
-}
-
 // ---------------------------------------------------------------------------
 // FORK-LOCAL: Ground Truth port integrity. The logic deliberately lives in
 // ./redline-check.mjs, not here: doctor.mjs is on update-system.mjs's
@@ -499,6 +496,17 @@ function checkBannedStrings(root) {
     };
   }
   return { pass: true, label: 'Red-line scan: candidate-facing files clean' };
+}
+
+function prereqPresent(root, path) {
+  return existsSync(join(root, ...path.split('/')));
+}
+
+function checkPrereq({ path, fix }) {
+  if (prereqPresent(projectRoot, path)) {
+    return { pass: true, label: `${path} found` };
+  }
+  return { warn: true, label: `${path} not found (user setup required)`, fix };
 }
 
 function checkFonts() {
@@ -546,28 +554,45 @@ function checkAutoDir(name) {
   }
 }
 
-// --strict only: probe the ATS slug of every tracked company in portals.yml so
-// a typo'd slug (which 404s silently on scans) surfaces here. Skipped gracefully
-// when portals.yml is absent. Delegates to verify-portals.mjs so there is one
-// slug-probing implementation. Network-bound, hence opt-in.
+// --strict only: probe every portals.yml entry (tracked_companies and job_boards)
+// so a typo'd slug or a dead board — either of which 404s silently on scans —
+// surfaces here. Skipped gracefully when portals.yml is absent. Delegates to
+// verify-portals.mjs so there is one probing implementation. Network-bound,
+// hence opt-in.
 async function checkPortalSlugs(root) {
   const portalsPath = join(root, 'portals.yml');
   if (!existsSync(portalsPath)) {
-    return { pass: true, label: 'ATS slugs: no portals.yml yet (skipped)' };
+    return { pass: true, label: 'Portal entries: no portals.yml yet (skipped)' };
   }
   try {
     const { verifyPortalsFile } = await import('./verify-portals.mjs');
-    const { results } = await verifyPortalsFile(portalsPath);
+    const { loadProviders } = await import('./providers/_registry.mjs');
+    const { makeHttpCtx } = await import('./providers/_http.mjs');
+    // Load the same provider plugins the scanner uses so tier 2 runs: without
+    // them every non-ATS entry (all job_boards, plus any Workday/Avature/…
+    // tracked_companies) resolves to an un-actionable "skipped" and a broken
+    // one would never reach "missing" — a false pass.
+    const providers = await loadProviders(join(__dirname, 'providers'));
+    const { results } = await verifyPortalsFile(portalsPath, {
+      providers,
+      httpCtx: makeHttpCtx(),
+    });
+    // Only 'missing' is a failure — a live probe that 404'd. 'skipped' (no
+    // provider claimed the entry) is left informational here, matching
+    // `verify-portals --strict`, which also fails only on 'missing'; an entry
+    // that resolves solely through a local parser is skipped by this path by
+    // design and must not fail the check.
     const unresolved = results.filter((r) => r.status === 'missing');
     if (unresolved.length === 0) {
-      return { pass: true, label: 'All ATS slugs in portals.yml resolve' };
+      return { pass: true, label: 'All portals.yml entries resolve' };
     }
     return {
       pass: false,
-      label: `${unresolved.length} ATS slug(s) in portals.yml do not resolve`,
+      label: `${unresolved.length} portals.yml entr${unresolved.length === 1 ? 'y' : 'ies'} do not resolve`,
       fix: [
         ...unresolved.map((r) => {
-          let line = `${r.name}: ${r.ats || '?'}/${r.slug || '?'} — ${r.reason || 'unresolved'}`;
+          const src = r.ats ? `${r.ats}/${r.slug}` : (r.provider || '?');
+          let line = `${r.name}: ${src} — ${r.reason || 'unresolved'}`;
           if (r.suggested) line += ` → try ${r.suggested.ats}/${r.suggested.slug}`;
           return line;
         }),
@@ -575,7 +600,7 @@ async function checkPortalSlugs(root) {
       ],
     };
   } catch (err) {
-    return { warn: true, label: `ATS slug check skipped: ${err.message}` };
+    return { warn: true, label: `Portal entry check skipped: ${err.message}` };
   }
 }
 
@@ -607,10 +632,20 @@ function checkPipelineFile() {
 
 // Discover plugins + their non-secret config block, synchronously. Used by both
 // the human check and the --json onboarding state.
+// A parse failure is REPORTED, not folded into {}. An unreadable config and a
+// config with nothing enabled produced the same empty object, so doctor — the
+// one tool whose job is to say what is wrong — answered "off" for every plugin
+// the user had actually switched on, and said nothing about why.
+//
+// Returns the config plus the parse error, so callers can tell the two apart.
 function readPluginConfigSync(root) {
   const cfgPath = join(root, 'config', 'plugins.yml');
-  if (!existsSync(cfgPath)) return {};
-  try { return yaml.load(readFileSync(cfgPath, 'utf8')) || {}; } catch { return {}; }
+  if (!existsSync(cfgPath)) return { cfg: {}, error: null };
+  try {
+    return { cfg: yaml.load(readFileSync(cfgPath, 'utf8')) || {}, error: null };
+  } catch (err) {
+    return { cfg: {}, error: String(err.message).split('\n')[0] };
+  }
 }
 
 // Plugin layer health: list discovered plugins + whether each enabled one's keys
@@ -619,7 +654,17 @@ function checkPlugins(root) {
   let manifests;
   try { manifests = discoverPlugins(pluginRoots(root)); } catch { return { pass: true, label: 'Plugins: none' }; }
   if (manifests.length === 0) return { pass: true, label: 'Plugins: none installed' };
-  const cfg = readPluginConfigSync(root);
+  const { cfg, error: cfgError } = readPluginConfigSync(root);
+  // Reported before the per-plugin lines, because when the config did not parse
+  // every one of those lines is derived from an empty object and says "off"
+  // regardless of what the user configured.
+  if (cfgError) {
+    return {
+      warn: true,
+      label: `Plugins: config/plugins.yml did not parse (${cfgError}) — every plugin below reads as off`,
+      fix: ['Fix the YAML in config/plugins.yml. Until then `plugins.mjs enable/disable` will refuse to write to it.'],
+    };
+  }
   const lines = [];
   const fixes = [];
   for (const m of manifests) {
@@ -638,10 +683,6 @@ async function main() {
   const { cli: activeCli, source: cliSource, warning: cliWarning } = resolveActiveCli();
 
   const checks = [
-    // FORK-LOCAL: Ground Truth port integrity + the candidate-facing red-line
-    // scan. See the lazy import at the top of this file.
-    checkGroundTruthFreshness(projectRoot),
-    checkBannedStrings(projectRoot),
     checkNodeVersion(),
     // Devuelve null salvo que el CLI activo sea Gemini: el filter(Boolean) de
     // abajo lo descarta, así que ningún otro usuario ve un check que no le toca.
@@ -653,6 +694,10 @@ async function main() {
     checkPlaywrightMcp(projectRoot, activeCli),
     checkScanExtractor(projectRoot),
     ...USER_LAYER_PREREQS.map(checkPrereq),
+    // FORK-LOCAL: Ground Truth port integrity + the candidate-facing red-line
+    // scan. See the lazy import at the top of this file.
+    checkGroundTruthFreshness(projectRoot),
+    checkBannedStrings(projectRoot),
     checkFonts(),
     checkPersonalization(projectRoot),
     checkAutoDir('data'),
@@ -662,7 +707,7 @@ async function main() {
     checkPlugins(projectRoot),
   ].filter(Boolean);
 
-  // Network-bound ATS slug probe — only under --strict.
+  // Network-bound portals.yml reachability probe — only under --strict.
   if (STRICT) {
     checks.push(await checkPortalSlugs(projectRoot));
   }
@@ -829,8 +874,12 @@ function onboardingState(root) {
     : {};
 
   let plugins = [];
+  let pluginConfigError = null;
   try {
-    const cfg = readPluginConfigSync(root);
+    const { cfg, error } = readPluginConfigSync(root);
+    // Travels in the JSON so a consumer can tell "nothing enabled" from "the
+    // config did not parse" — the two used to be the same empty list.
+    pluginConfigError = error;
     plugins = discoverPlugins(pluginRoots(root)).map((m) => {
       const s = pluginStatus(m, cfg);
       return { id: m.id, hooks: m.hooks, enabled: s.enabled, missingEnv: s.missingEnv };
@@ -847,6 +896,9 @@ function onboardingState(root) {
     warnings,
     autoCopied,
     plugins,
+    // Only present when it happened, so existing consumers see no new key on a
+    // healthy run and a broken config is impossible to read as "none enabled".
+    ...(pluginConfigError ? { pluginConfigError } : {}),
     playwright_mcp: playwrightMcp,
     active_cli: activeCli,
     cli_source: cliSource,
