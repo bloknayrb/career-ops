@@ -84,6 +84,7 @@ tmp/
 *.sync-conflict-*
 .fuse_hidden*
 .stfolder/
+.stignore
 batch/batch-runner.pid
 batch/.batch-state.lock/
 batch/*.bak
@@ -99,6 +100,45 @@ output/.voice-lint/
 # Same reasoning: tests/ is on SYSTEM_PATHS and the updater prunes any TRACKED
 # tests/ file absent from upstream, so this must stay untracked to survive.
 tests/cover-letter-prose.test.mjs
+
+# The rest of the fork-owned PDF/cover-letter chain, untracked for the same
+# reason — and these were NOT safe before, they were only lucky.
+#
+# apply() PRESERVES a locally-modified system file, but preservation is ONE-SHOT:
+# the preserved file is held out of the update COMMIT by an :(exclude) pathspec,
+# so at the NEXT update it is byte-identical to the new baseline, drops out of
+# `atRisk = changedLocally ∩ differsFromUpstream`, and — being absent upstream —
+# gets pruned. The cycle is: pruned → restored by hand → now differs → preserved
+# → frozen → baseline resets → exposed → pruned again. These five were pruned at
+# v1.29.0, restored, preserved through v1.30.0, and `node fork-check.mjs` showed
+# them back in the exposed state for v1.31.0. Untracking breaks the cycle: the
+# prune spares untracked files unconditionally.
+#
+# v1.30.0's isReferencedByPreservedFile() does NOT rescue them — it only scans
+# preserved .html/.css for a basename, and the prose template is reached from a
+# .mjs. Nor does config/local-paths.txt: localUserPaths() rejects any path that
+# collides with a SYSTEM_PATHS entry, and templates/ and tests/ are both on it.
+# Untracked is the only mechanism left.
+templates/cover-letter-prose-template.html
+tests/pdf-content-check.test.mjs
+tests/fixtures/pdf-flow-fixture.html
+tests/fixtures/pdf-footer-fixture.html
+tests/fixtures/pdf-rtl-fixture.html
+
+# Two scanner providers upstream has REMOVED but portals.yml still routes to:
+# `provider: macher` and `provider: jobsgemach` in tracked_companies. Both are
+# absent from upstream and were therefore prune-bait; jobsgemach.mjs was in fact
+# deleted by the v1.30.0 apply on 2026-08-27 and restored from d8c98a8f^.
+# providers/_registry.mjs loads this directory by readdirSync, so a missing file
+# is not an import error anywhere — the provider just silently stops existing and
+# that portal quietly stops being scanned. Untracked is what keeps them.
+#
+# Careful: a plain repo-wide grep does NOT show these as "referenced". portals.yml
+# is user-layer and gitignored, so gitignore-respecting search tools skip it, and
+# both providers read as dead orphans. They are not. Check portals.yml explicitly
+# before concluding any provider is unused.
+providers/macher.mjs
+providers/jobsgemach.mjs
 
 # test-all.mjs copies the whole repo (including cv.md, article-digest.md,
 # voice-dna.md) into these scratch dirs and deletes them in a finally block. On
@@ -150,3 +190,100 @@ linkedin_post_reachout.md
 # reports/*.md is already ignored, but neither of these matches that pattern.
 reports/.discarded/
 reports/_stale_*
+
+# --- pre-seeded from career-ops v1.27.0 updater (see note) ---
+local/
+!data/offers/
+!data/parser-output/
+data/parser-output/**
+!data/parser-output/**/
+!data/parser-output/.gitkeep
+!data/parser-output/**/.gitkeep
+batch/batch-state-recovery.d/
+*passport*
+*diploma*
+*简历*
+*学位*
+*成绩单*
+interview-prep/*
+!interview-prep/
+!interview-prep/.gitkeep
+!interview-prep/sessions/
+interview-prep/sessions/*
+!interview-prep/sessions/.gitkeep
+!interview-prep/sessions/README.md
+config/cv-facts.json
+config/benchmarks.yml
+# config/local-paths.txt is deliberately TRACKED in this fork, not ignored.
+# It declares pdf-config.mjs, which upstream does not ship. While it was
+# ignored, CI checked out the repo without it, every declared path read as an
+# orphan there, and validate-system-paths-coverage.mjs was red on all three
+# platforms while passing locally — the exact loop upstream #2991 describes.
+# v1.31.0 excludes the declaration file from the coverage manifest so a fork
+# can commit it; do not re-add an ignore rule for it.
+.manifesto-noted
+config/plugins.yml
+plugins.local/
+plugins.lock
+**/.env.local
+**/.env*.local
+**/*.tsbuildinfo
+reports/*-RESERVED.md
+*.bak*
+data/model-blacklist.json
+.idea/
+.vscode/
+.opencode/settings.local.json
+.opencode/memory/
+opencode.json
+career-dashboard.exe
+!web/package-lock.json
+.playwright-mcp/
+test-results/
+playwright-report/
+plan/
+.career-ops-web/
+!test-fixtures/**
+documents/*
+!documents/.gitkeep
+!documents/README.md
+data/intake-state.json
+data/agent-inbox.md
+
+# fork-check.mjs — detects fork-local work that an update is about to destroy.
+# Same preservation mechanism as redline-check.mjs: untracked + absent from
+# SYSTEM_PATHS is the entire reason `apply` leaves it alone. Its highest-value
+# check derives the prune-exposed set mechanically (tracked ∩ allowlisted dir
+# prefix ∩ absent from upstream ∩ not in apply()'s preserved set), which is the
+# question a hand-maintained inventory keeps getting wrong.
+fork-check.mjs
+
+# Added by career-ops update-system.mjs.
+# System-owned ignore rules that were missing from this file. Your own rules
+# are never modified, reordered or removed: the updater only appends patterns
+# it cannot already find somewhere in this file. Reordering these lines, or
+# moving them elsewhere in the file, is safe and will not bring them back.
+# Deleting or commenting one out is not: they are system-owned, several of
+# them guard files holding personal data, and the next update re-adds any
+# that is no longer present as a live pattern.
+# The tracker's derived SQLite index (tracker.mjs, #918). It sits beside the
+# tracker markdown, so on the standard layout it lands in data/ and is already
+# covered by the rules above — but resolveTrackerPath() falls back to
+# `<root>/applications.md` when data/applications.md is absent, and the index
+# follows it there. That is the legacy install layout, and it is also every
+# fresh clone: `node test-all.mjs` leaves a 36KB applications.db in the repo
+# root, which `git add .` then stages.
+# Its content is the whole tracker — company, role, score, status, notes — so it
+# carries the same PII as the file it indexes, under a name none of the rules
+# above match. SQLite's -wal/-shm sidecars travel with it.
+# Deliberately not root-anchored. The index follows the tracker markdown, and
+# getCareerOpsRoot() resolves a relative CAREER_OPS_ROOT (or .career-ops-data
+# marker) against the codebase directory — so a data root configured as
+# `career-data` puts both inside the checkout, in neither of the two places an
+# anchored rule would cover. Nothing tracked in this repo ends in .db, and an
+# ignore rule cannot untrack a file that is already tracked, so the cost of the
+# wider glob is a `git add -f` on a .db fixture nobody has added yet; the cost
+# of the narrower one is this leak, for every non-default data root.
+*.db
+*.db-wal
+*.db-shm

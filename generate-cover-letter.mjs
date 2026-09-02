@@ -41,19 +41,57 @@
 
 import { readFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { createHash } from "crypto";
-import { dirname, resolve, basename, join } from "path";
+import { dirname, resolve, relative, isAbsolute, basename, join } from "path";
 import { fileURLToPath, pathToFileURL } from "url";
 import { parseArgs } from "util";
 import { assertFacts } from "./verify-cv-facts.mjs";
 import { resolveTemplate } from "./cv-templates.mjs";
+import { isMainModule } from "./lib/is-main-module.mjs";
 
-const OUTPUT_ROOT = resolve("output");
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const OUTPUT_ROOT = resolve(__dirname, "output");
 
-/** Sanitize a requested output filename and keep it under the output directory. */
-function safeOutputPath(raw) {
-  // Derive a sanitized filename from raw string (strip path separators and dots)
-  const filename = basename(raw).replace(/[^a-zA-Z0-9._-]/g, "-").replace(/\.{2,}/g, "-");
-  return join(OUTPUT_ROOT, filename);
+/**
+ * Resolve a requested --out/output_path against OUTPUT_ROOT, preserving any
+ * subdirectory structure that stays inside output/ (#2940 — a bare
+ * basename() used to flatten legitimate bundle paths like
+ * output/{NNN}-{company}-{role}/cover-letter/vNNN/). A path that would
+ * escape output/ (absolute elsewhere, or via `..`) is refused loudly instead
+ * of being silently rewritten.
+ */
+export function safeOutputPath(raw) {
+  if (raw == null || String(raw).trim() === "") {
+    throw new Error("Refusing to write the cover letter outside output/: (empty path)");
+  }
+  const trimmed = String(raw).trim();
+
+  const asWritten = resolve(trimmed);
+  if (containedInOutput(asWritten)) return asWritten;
+
+  // Absolute paths and any `..` segment already chose a location; if that
+  // location is not inside output/, refuse instead of rewriting to a basename.
+  if (isAbsolute(trimmed) || /(^|[\\/])\.\.([\\/]|$)/.test(trimmed)) {
+    throw new Error(`Refusing to write the cover letter outside output/: ${raw}`);
+  }
+
+  // Bare filename or a relative path that is not already under output/
+  // (e.g. --out cover.pdf, or --out output/foo/bar.pdf from another cwd).
+  const posix = trimmed.replace(/\\/g, "/").replace(/^\.\//, "");
+  const relativeToRoot = posix === "output" || posix === "output/"
+    ? ""
+    : posix.startsWith("output/")
+      ? posix.slice("output/".length)
+      : posix;
+  const candidate = resolve(OUTPUT_ROOT, relativeToRoot);
+  if (containedInOutput(candidate)) return candidate;
+
+  throw new Error(`Refusing to write the cover letter outside output/: ${raw}`);
+}
+
+/** True when absPath is a file (not output/ itself) still inside OUTPUT_ROOT. */
+function containedInOutput(absPath) {
+  const rel = relative(OUTPUT_ROOT, absPath);
+  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
 }
 
 /** Assert that a payload object contains the required keys. */
@@ -683,7 +721,7 @@ Usage:
     // Imported only after fact validation so a failed gate does not load
     // Playwright or create a PDF artifact.
     const { renderHtmlToPdf } = await import("./generate-pdf.mjs");
-    const outputPath = resolve(payload.output_path);
+    const outputPath = safeOutputPath(payload.output_path);
     // A cover letter that spills onto page 2 is a defect, and it is one a human
     // only catches by opening the PDF. Fail on it: the fix is cutting the letter
     // (and re-auditing the cut), never tightening the CSS until it fits.
@@ -726,5 +764,5 @@ Usage:
   }
 }
 
-const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+const isMain = isMainModule(import.meta.url);
 if (isMain) main();

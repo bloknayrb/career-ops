@@ -1,0 +1,7 @@
+# local-paths.txt — files this checkout owns, that upstream does not ship.
+# See config/local-paths.example.txt for the full format documentation.
+
+# Fork-local shared PDF page-layout config + post-generation content-coverage
+# check (#generate-pdf-margin-patch). generate-pdf.mjs and
+# generate-cover-letter.mjs import it; upstream has no equivalent module.
+pdf-config.mjs

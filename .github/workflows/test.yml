@@ -27,37 +27,21 @@ jobs:
         if: runner.os == 'Windows'
         run: git config --global core.autocrlf false
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - name: Set up Node 18 for syntax compatibility
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - run: npm run lint
+      - name: Set up Node 24 for the test suite
+        uses: actions/setup-node@v7
         with:
           node-version: '24'
       - uses: actions/setup-go@v7
         with:
           go-version: '1.26'
+      # Skip the postinstall (npx playwright install chromium); the tests
+      # never launch a browser, so the ~170 MB download is pure CI overhead.
       - run: npm install --ignore-scripts
-      # The PDF content-coverage check (tests/pdf-content-check.test.mjs) is an
-      # end-to-end Chromium render, so it is the one test that cannot run
-      # without a browser. It guards a regression that shipped twice — a
-      # clipped contact line — and without this step it would skip in CI
-      # forever, which is how a guard becomes decoration.
-      #
-      # Tradeoff: ~170 MB and ~20s per PR run. Accepted, and scoped: only
-      # chromium (not all browsers), cached across runs by key on the
-      # Playwright version, and --with-deps is omitted since ubuntu-latest
-      # already carries the shared libraries the headless build needs. The
-      # cheaper alternative — leaving --ignore-scripts alone and letting the
-      # check skip — is what this PR exists to fix.
-      - name: Resolve Playwright version
-        id: pw
-        run: echo "version=$(node -p "require('./package.json').dependencies.playwright")" >> "$GITHUB_OUTPUT"
-      - name: Cache Playwright browsers
-        uses: actions/cache@v4
-        id: pw-cache
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-chromium-${{ runner.os }}-${{ steps.pw.outputs.version }}
-      - name: Install Chromium
-        if: steps.pw-cache.outputs.cache-hit != 'true'
-        run: npx playwright install chromium
       - run: node test-all.mjs --quick
       - name: Go dashboard tests
         run: go test ./...
@@ -79,7 +63,7 @@ jobs:
       - run: npm run test:cv-visual
       - name: Upload CV visual diffs and rendered previews
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: cv-visual-artifacts
           path: |
@@ -105,3 +89,5 @@ jobs:
         run: node upgrade-tests.mjs --pr-gate
       - name: Canary (harness must be able to fail)
         run: node upgrade-tests.mjs --canary
+      - name: Local-paths declaration survives a real apply (#2421)
+        run: node upgrade-tests.mjs --local-paths
