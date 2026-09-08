@@ -66,9 +66,11 @@ config/profile.yml
 config/cv-facts.json
 config/benchmarks.yml
 # Fork-local path declarations — this checkout's own files, read by
-# update-system.mjs. Gitignored on purpose: it describes THIS clone, not the
-# project, and must survive the sync that overwrites update-system.mjs (#2421).
-config/local-paths.txt
+# update-system.mjs. Upstream gitignores config/local-paths.txt here; THIS FORK
+# DELIBERATELY TRACKS IT and the rule is omitted on purpose. See the note further
+# down ("deliberately TRACKED in this fork") for the CI failure that caused —
+# while it was ignored, CI checked out the repo without it and every declared
+# path read as an orphan. Do not restore the rule when reconciling this file.
 portals.yml
 modes/_profile.md
 modes/_custom.md
@@ -197,13 +199,18 @@ cl-*.html
 
 # All pipeline data is personal (only the directory structure is tracked)
 
-# Received offers/contracts written by the offer-prep mode: PII, never tracked.
-# Redundant with data/* above, but test-all.mjs asserts these exact lines so the
-# protection is stated explicitly rather than inherited from a broader glob.
-data/offers/*
+# Received offers/contracts: covered by the `data/offers/*` + `!data/offers/.gitkeep`
+# pair near the top of this file, which is upstream's and is what test-all.mjs
+# asserts. A second bare `data/offers/*` used to sit here; because it came AFTER
+# that negation it silently re-excluded .gitkeep, so the tracked scaffold read as
+# "ignored but tracked". Do not restate the rule here — in .gitignore, order is
+# behaviour.
 
-# Personal working files
-interview-prep/
+# Personal working files. Upstream's `interview-prep/*` + negations (top of file)
+# does this job. A bare `interview-prep/` used to sit here and it CANNOT work:
+# git will not re-include a file whose parent directory is excluded, so the
+# directory form silently killed every !interview-prep/... negation above and
+# made four tracked scaffold files unreachable.
 tmp/
 
 # Sync and runtime artifacts
