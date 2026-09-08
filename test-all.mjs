@@ -365,11 +365,21 @@ const scripts = [
   { name: 'invite-match.mjs --self-test', expectExit: 0 },
   { name: 'tracker-sync-check.mjs --self-test', expectExit: 0 },
   { name: 'updater-migration-tests.mjs', expectExit: 0 },
-  { name: 'tracker-columns-tests.mjs', expectExit: 0 },
+  // FORK-LOCAL budget, same reasoning and same remedy as
+  // tracker-writer-lock-tests.mjs below (#2906) — these two crossed the 30s
+  // default at v1.32.0 and were being killed as `exit null, signal SIGTERM`
+  // while passing 92/0 and 96/0 when run alone. Not contention: measured
+  // UNLOADED on this box at 54s and 36s. tracker-columns-tests.mjs grew by 796
+  // lines of new cases in v1.32.0, which is what pushed it over.
+  //
+  // Worth sending upstream rather than carrying forever: the growth is
+  // upstream's, so any slower runner hits this too, and a suite that always
+  // reports two failures is a suite nobody reads.
+  { name: 'tracker-columns-tests.mjs', expectExit: 0, timeoutMs: 180_000 },
   { name: 'agent-inbox-tests.mjs', expectExit: 0 },
   { name: 'followup-seed-tests.mjs', expectExit: 0 },
   { name: 'paste-reply-tests.mjs', expectExit: 0 },
-  { name: 'set-status-tests.mjs', expectExit: 0 },
+  { name: 'set-status-tests.mjs', expectExit: 0, timeoutMs: 180_000 }, // FORK-LOCAL: see above
   // The one script in this list that genuinely needs longer than the shared
   // budget. It spawns competing writer processes for 27 contention cases, and
   // that cost is the behaviour under test rather than slack to be trimmed.
