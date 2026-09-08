@@ -703,6 +703,11 @@ Usage:
     // letter built from the approved markdown, so the gate audits the artifact
     // that actually ships rather than a payload the renderer may diverge from.
     const factCheck = assertFacts(html, { label: "cover letter" });
+    // Ahead of the verdict, because it qualifies it: with no config the phrase
+    // lists are empty, so a silent gate here covers metrics and facts only.
+    if (factCheck.configMissing) {
+      console.error("No config/cv-facts.json — forbidden/advisory phrase checks did not run.");
+    }
     if (factCheck.verdict === "warn") {
       console.error(`CV fact check warning: cover letter`);
       for (const phrase of factCheck.warnings) {

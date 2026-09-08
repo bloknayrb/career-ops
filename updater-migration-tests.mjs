@@ -192,7 +192,11 @@ try {
 // exempt: git checkout of a directory pathspec tolerates content drift
 // inside it. Add an entry to ALLOWED_MISSING_ENTRIES only with a comment
 // justifying why it may legitimately be absent.
-const ALLOWED_MISSING_ENTRIES = new Set([]);
+const ALLOWED_MISSING_ENTRIES = new Set([
+  // Kept in SYSTEM_PATHS for one release so staleSystemFiles() prunes the
+  // retired suite during upgrades after it moved into tests/.
+  'lib/context-budget.test.mjs',
+]);
 for (const [listName, entries] of [['SYSTEM_PATHS', systemPaths], ['BOOTSTRAP_PATHS', bootstrapPaths]]) {
   for (const entry of entries) {
     if (entry.endsWith('/')) continue;
@@ -311,12 +315,12 @@ const twoPassManifestChecks = [
     pattern: /\b(?:git|runGit)\('checkout',\s*'HEAD',\s*'--'/,
   },
   {
-    name: 'apply commit is scoped to update paths, not bare commit (#915)',
-    pattern: /git\('commit',\s*'-m',[^)]+'--',\s*\.\.\.pathsToStage\)/,
+    name: 'apply commit is scoped to expanded update files, not directories (#3504)',
+    pattern: /git\('commit',\s*'-m',[^)]+'--',\s*\.\.\.expandedPathsToStage\)/,
   },
   {
-    name: 'rollback commit is scoped to rollback paths, not bare commit (#915)',
-    pattern: /git\('commit',\s*'-m',[^)]+'--',\s*\.\.\.rollbackPaths\)/,
+    name: 'rollback commit is scoped to expanded backup files, not directories (#3504)',
+    pattern: /git\('commit',\s*'-m',[^)]+'--',\s*\.\.\.expandedRollbackPaths\)/,
   },
   {
     name: 'apply captures uncommitted work via git stash create before branching (#915)',
