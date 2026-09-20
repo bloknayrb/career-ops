@@ -97,22 +97,16 @@
     margin-bottom: 4pt;
   }
 
-  /* Hanging indent, NOT position:relative + position:absolute — see the same
-     rule in cover-letter-prose-template.html. A positioned list item is painted
-     in a later stacking phase, so its text lands out of document order in the
-     PDF content stream and assertPdfContentCoverage()'s contiguous match fails,
-     reporting a clipped letter when nothing was clipped. */
   .achievements li {
     margin-bottom: 5pt;
     padding-left: 14pt;
-    text-indent: -14pt;
+    position: relative;
   }
 
   .achievements li::before {
     content: "\2022";
-    display: inline-block;
-    width: 14pt;
-    text-indent: 0;
+    position: absolute;
+    left: 0;
   }
 
   .language-closing {
