@@ -8,6 +8,22 @@ redline-check.mjs
 data/applications.md
 data/pipeline.md
 data/scan-history.tsv
+local/
+# Everything under data/ is generated or personal at runtime — only .gitkeep
+# placeholders are tracked (verify with `git ls-files data/`). A blanket rule
+# means a new generated file (e.g. a future log/cache addition) is covered
+# for every user automatically, with no per-filename .gitignore update needed.
+data/*
+!data/.gitkeep
+!data/offers/
+!data/parser-output/
+# Received offers/contracts, promise notes, prep reports (PII — never commit)
+data/offers/*   
+!data/offers/.gitkeep
+data/parser-output/**
+!data/parser-output/**/
+!data/parser-output/.gitkeep
+!data/parser-output/**/.gitkeep
 reports/*.md
 !reports/.gitkeep
 output/*
@@ -15,11 +31,31 @@ output/*
 batch/logs/*
 !batch/logs/.gitkeep
 batch/batch-state.tsv
+batch/batch-state-recovery.d/
 batch/batch-input.tsv
 batch/tracker-additions/**/*.tsv
 !batch/tracker-additions/.gitkeep
 jds/*
 !jds/.gitkeep
+
+# Personal documents — never commit scans or copies of these (PII).
+# Catches common identity/credential filenames so they can't be staged by accident.
+*passport*
+*diploma*
+*简历*
+*学位*
+*成绩单*
+
+# Interview prep (accumulated STAR+R stories — user data)
+interview-prep/*
+!interview-prep/
+!interview-prep/.gitkeep
+# Session transcripts hold real interviewer names/companies — ignore content,
+# ship only the system-owned scaffold (README + .gitkeep). #1242
+!interview-prep/sessions/
+interview-prep/sessions/*
+!interview-prep/sessions/.gitkeep
+!interview-prep/sessions/README.md
 
 # Writing samples (user's personal files — never committed)
 writing-samples/*
@@ -27,13 +63,35 @@ writing-samples/*
 
 # User config and customization (never auto-updated)
 config/profile.yml
+config/cv-facts.json
+config/benchmarks.yml
+# Fork-local path declarations — this checkout's own files, read by
+# update-system.mjs. Upstream gitignores config/local-paths.txt here; THIS FORK
+# DELIBERATELY TRACKS IT and the rule is omitted on purpose. See the note further
+# down ("deliberately TRACKED in this fork") for the CI failure that caused —
+# while it was ignored, CI checked out the repo without it and every declared
+# path read as an orphan. Do not restore the rule when reconciling this file.
 portals.yml
 modes/_profile.md
+modes/_custom.md
+modes/_brief.md
+voice-dna.md
 .update-dismissed
 .update-lock
+.manifesto-noted
+
+# Plugin layer — opt-in toggles + user-installed plugins + integrity lock (never auto-updated)
+config/plugins.yml
+plugins.local/
+plugins.lock
 
 # Secrets (never commit — use .env.example as template)
 .env
+# Universal safety net — protects ALL checkouts/branches, incl. untracked subprojects
+# (e.g. web/ before it graduates to main). Never commit local env files or TS build caches.
+**/.env.local
+**/.env*.local
+**/*.tsbuildinfo
 
 # Timestamped backups of user-layer files. `cv.md` being ignored does NOT ignore
 # `cv.md.bak-<iso>` or `cv.md.bak10`, and those carry the same PII — one
@@ -46,16 +104,90 @@ modes/_profile.md
 .resolved-prompt-*
 node_modules/
 bun.lock
+# Working copy the test suite makes under the repo root (test-all.mjs
+# `mkdtempSync(join(ROOT, '.tmp-script-test-'))`). A clean run deletes it; a
+# run interrupted mid-way leaves ~650MB of duplicated repo behind, which a
+# reflexive `git add .` would then stage as ~1000 new files.
+.tmp-script-test-*/
+
+# Report-number reservation sentinels (ephemeral, created by reserve-report-num.mjs)
+reports/*-RESERVED.md
+
+# Backup files. Two shapes exist: `{file}.bak` (normalize-statuses.mjs,
+# dedup-tracker.mjs, tracker.mjs) and `{file}.bak-{ISO timestamp}`
+# (web/src/lib/core/safe-write.ts). A plain `*.bak` glob misses the timestamped
+# form, which for cv.md or portals.yml leaves a file holding the same PII as the
+# original sitting untracked in the repo root. Trailing `*` covers both.
+*.bak*
+
+# The tracker and its follow-ups file in the LEGACY ROOT LAYOUT. resolveTrackerPath()
+# documents its own fallback chain — CAREER_OPS_TRACKER > <root>/data/applications.md
+# > <root>/applications.md — and that third entry is a supported install shape, not a
+# mistake. data/ is covered by the blanket rule at the top of this file; the root
+# spelling was not covered by anything.
+#
+# The content is the user's whole job search: company, role, score, status, notes.
+# cv.md, portals.yml, article-digest.md and voice-dna.md are all ignored at the root
+# already, and #3469 ignores the derived .db index on the argument that it "holds the
+# same PII as the tracker" — while the tracker itself sat beside it, unignored.
+#
+# Unanchored, like the .db rule below and for the same reason: getCareerOpsRoot()
+# resolves a relative CAREER_OPS_ROOT (or .career-ops-data marker) against the
+# codebase directory, so a data root configured as `career-data` puts these inside
+# the checkout, where an anchored rule would not reach them. The upgrade fixtures
+# that share these names stay tracked via the `!test-fixtures/**` rule further down,
+# which is a later pattern and therefore wins.
+applications.md
+follow-ups.md
+
+# The tracker's derived SQLite index (tracker.mjs, #918). It sits beside the
+# tracker markdown, so on the standard layout it lands in data/ and is already
+# covered by the rules above — but resolveTrackerPath() falls back to
+# `<root>/applications.md` when data/applications.md is absent, and the index
+# follows it there. That is the legacy install layout, and it is also every
+# fresh clone: `node test-all.mjs` leaves a 36KB applications.db in the repo
+# root, which `git add .` then stages.
+#
+# Its content is the whole tracker — company, role, score, status, notes — so it
+# carries the same PII as the file it indexes, under a name none of the rules
+# above match. SQLite's -wal/-shm sidecars travel with it.
+#
+# Deliberately not root-anchored. The index follows the tracker markdown, and
+# getCareerOpsRoot() resolves a relative CAREER_OPS_ROOT (or .career-ops-data
+# marker) against the codebase directory — so a data root configured as
+# `career-data` puts both inside the checkout, in neither of the two places an
+# anchored rule would cover. Nothing tracked in this repo ends in .db, and an
+# ignore rule cannot untrack a file that is already tracked, so the cost of the
+# wider glob is a `git add -f` on a .db fixture nobody has added yet; the cost
+# of the narrower one is this leak, for every non-default data root.
+*.db
+*.db-wal
+*.db-shm
+
+# OpenRouter runner — generated data (personal, never commit)
+data/model-blacklist.json
 
 # OS
 .DS_Store
 *.mov
 *.mp4
 
-# Claude Code local
+# IDE-specific local config
+.idea/
+.vscode/
+
+# CLI-specific local config
 .claude/settings.local.json
 .mcp.json
 .claude/memory/
+.opencode/settings.local.json
+.opencode/memory/
+# OpenCode project config (often holds personal MCP/model/per-machine prefs).
+opencode.json
+# Claude Code project-level MCP server config — commonly ends up holding
+# personal server credentials (e.g. a plugin's API token) once a user adds
+# an MCP server, same risk class as .env.
+.mcp.json
 career-dashboard
 package-lock.json
 
@@ -66,18 +198,19 @@ cl-*.html
 .career-ops-render-*.html
 
 # All pipeline data is personal (only the directory structure is tracked)
-data/*
-!data/.gitkeep
 
-# Received offers/contracts written by the offer-prep mode: PII, never tracked.
-# Redundant with data/* above, but test-all.mjs asserts these exact lines so the
-# protection is stated explicitly rather than inherited from a broader glob.
-data/offers/*
-!data/offers/.gitkeep
+# Received offers/contracts: covered by the `data/offers/*` + `!data/offers/.gitkeep`
+# pair near the top of this file, which is upstream's and is what test-all.mjs
+# asserts. A second bare `data/offers/*` used to sit here; because it came AFTER
+# that negation it silently re-excluded .gitkeep, so the tracked scaffold read as
+# "ignored but tracked". Do not restate the rule here — in .gitignore, order is
+# behaviour.
 
-# Personal working files
-interview-prep/
-modes/_custom.md
+# Personal working files. Upstream's `interview-prep/*` + negations (top of file)
+# does this job. A bare `interview-prep/` used to sit here and it CANNOT work:
+# git will not re-include a file whose parent directory is excluded, so the
+# directory form silently killed every !interview-prep/... negation above and
+# made four tracked scaffold files unreachable.
 tmp/
 
 # Sync and runtime artifacts
@@ -145,7 +278,6 @@ providers/jobsgemach.mjs
 # Windows that rm can fail with EPERM, stranding a full copy of the user layer in
 # an untracked, previously un-ignored directory — exactly what the no-user-data
 # CI check exists to stop. Ignore them so a stranded copy can never be committed.
-.tmp-script-test-*/
 
 # Portfolio sources and outreach drafts. These are client-project and third-party
 # detail, and `origin` is a PUBLIC fork — .github/workflows/no-user-data.yml does
@@ -181,7 +313,6 @@ modes/bk-upwork.md
 # User-layer triage brief. doctor.mjs auto-copies it from modes/_brief.template.md,
 # same as _profile.md / _custom.md above; tracking it would also orphan-flag in
 # validate-system-paths-coverage.mjs.
-modes/_brief.md
 
 # Outreach drafts naming real people. Same reasoning as recruiter-outreach.md.
 linkedin_post_reachout.md
@@ -192,28 +323,6 @@ reports/.discarded/
 reports/_stale_*
 
 # --- pre-seeded from career-ops v1.27.0 updater (see note) ---
-local/
-!data/offers/
-!data/parser-output/
-data/parser-output/**
-!data/parser-output/**/
-!data/parser-output/.gitkeep
-!data/parser-output/**/.gitkeep
-batch/batch-state-recovery.d/
-*passport*
-*diploma*
-*简历*
-*学位*
-*成绩单*
-interview-prep/*
-!interview-prep/
-!interview-prep/.gitkeep
-!interview-prep/sessions/
-interview-prep/sessions/*
-!interview-prep/sessions/.gitkeep
-!interview-prep/sessions/README.md
-config/cv-facts.json
-config/benchmarks.yml
 # config/local-paths.txt is deliberately TRACKED in this fork, not ignored.
 # It declares pdf-config.mjs, which upstream does not ship. While it was
 # ignored, CI checked out the repo without it, every declared path read as an
@@ -221,21 +330,6 @@ config/benchmarks.yml
 # platforms while passing locally — the exact loop upstream #2991 describes.
 # v1.31.0 excludes the declaration file from the coverage manifest so a fork
 # can commit it; do not re-add an ignore rule for it.
-.manifesto-noted
-config/plugins.yml
-plugins.local/
-plugins.lock
-**/.env.local
-**/.env*.local
-**/*.tsbuildinfo
-reports/*-RESERVED.md
-*.bak*
-data/model-blacklist.json
-.idea/
-.vscode/
-.opencode/settings.local.json
-.opencode/memory/
-opencode.json
 career-dashboard.exe
 !web/package-lock.json
 .playwright-mcp/
@@ -284,6 +378,55 @@ fork-check.mjs
 # ignore rule cannot untrack a file that is already tracked, so the cost of the
 # wider glob is a `git add -f` on a .db fixture nobody has added yet; the cost
 # of the narrower one is this leak, for every non-default data root.
-*.db
-*.db-wal
-*.db-shm
+
+# Playwright MCP server run artifacts (ephemeral, machine-local)
+
+# Planning (local scratchpad)
+
+# Web — runtime cache/history the dashboard writes locally; nothing here is tracked.
+
+# Upgrade-test fixtures are fictional system-layer data, never user data
+# (see DATA_CONTRACT.md). Re-include them past the unanchored user-layer
+# patterns above (cv.md, portals.yml).
+
+# Profile intake sources (master CV / LinkedIn export / diplomas / references
+# — user PII, never commit). Ship only the system-owned scaffold. #1723
+# Intake fingerprints — the recorded source filenames may themselves carry
+# PII (e.g. cv/jane-doe-master-cv.pdf). #1723
+
+# Added by career-ops update-system.mjs.
+# System-owned ignore rules that were missing from this file. Your own rules
+# are never modified, reordered or removed: the updater only appends patterns
+# it cannot already find somewhere in this file. Reordering these lines, or
+# moving them elsewhere in the file, is safe and will not bring them back.
+# Deleting or commenting one out is not: they are system-owned, several of
+# them guard files holding personal data, and the next update re-adds any
+# that is no longer present as a live pattern.
+# Single-level glob above misses subdirectories (e.g. reports/superseded/).
+# Kept alongside it rather than replacing it, so update-system.mjs does not
+# re-append the original pattern as "missing".
+reports/**/*.md
+!reports/.gitkeep
+!output/.gitkeep
+!batch/logs/.gitkeep
+!batch/tracker-additions/.gitkeep
+!jds/.gitkeep
+!interview-prep/
+!interview-prep/.gitkeep
+!interview-prep/sessions/
+!interview-prep/sessions/.gitkeep
+!interview-prep/sessions/README.md
+!writing-samples/README.md
+# FORK-LOCAL: upstream gitignores config/local-paths.txt (#2421) because it
+# describes one clone. This fork TRACKS it instead, and the ignore rule must
+# not come back. While it was ignored it existed only on one disk, so CI
+# checked out the repo without it, pdf-config.mjs read as an orphan there, and
+# validate-system-paths-coverage.mjs was red on every runner while passing
+# locally. v1.31.0's coverage check excludes LOCAL_PATHS_FILE from the
+# manifest, which is what lets a fork commit it. Leaving it both ignored and
+# tracked also trips tests/user-layer-untracked.test.mjs.
+# update-system.mjs re-appends this rule on every apply — delete it again.
+!web/package-lock.json
+!test-fixtures/**
+!documents/.gitkeep
+!documents/README.md

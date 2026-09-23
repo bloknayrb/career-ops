@@ -98,7 +98,7 @@
 
 ## What Is This
 
-career-ops ([career-ops.org](https://career-ops.org), also known as **careerops**) turns any AI coding CLI into a full job search command center. Instead of manually tracking applications in a spreadsheet, you get an AI-powered pipeline that:
+career-ops ([career-ops.org](https://career-ops.org), also known as **careerops**) is an open-source AI job search that runs locally inside any AI coding CLI: it evaluates offers, tailors your CV and tracks every application, and you always have the final call. Instead of manually tracking applications in a spreadsheet, you get an AI-powered pipeline that:
 
 - **Evaluates offers** into a structured report -- blocks A through H, with a global 1-5 score reached by holistic judgement across five dimensions rather than an arithmetic formula. Block B's per-requirement importance column and block G's posting-legitimacy assessment are both separate, score-neutral signals that never affect the score; block H is drafted only at 4.5 and above
 - **Generates tailored PDFs** -- ATS-optimized CVs customized per job description
@@ -318,21 +318,46 @@ npm run gemini:eval -- "JD text here"
 career-ops uses a shared command router. In CLIs that register slash commands, it looks like this:
 
 ```
-/career-ops                → Show all available commands
-/career-ops {paste a JD}   → Full auto-pipeline (evaluate + PDF + tracker)
-/career-ops scan           → Scan portals for new offers
-/career-ops pdf            → Generate ATS-optimized CV
-/career-ops cover          → Cover letter generator (paste JD or /career-ops cover {slug})
-/career-ops email          → Formal application email draft (draft-only; never sends, submits, or clicks)
-/career-ops batch          → Batch evaluate multiple offers
-/career-ops tracker        → View application status
-/career-ops apply          → Fill application forms with AI
-/career-ops outcome        → Record application outcome & archive artifacts
-/career-ops pipeline       → Process pending URLs
-/career-ops contacto       → Find hiring manager / recruiter / peer + draft a ≤300-char LinkedIn message per contact type
-/career-ops deep           → Generate a structured 6-axis research prompt (AI strategy, recent moves, culture, challenges, competitors, candidate angle)
-/career-ops training       → Evaluate a course/cert
-/career-ops project        → Evaluate a portfolio project
+/career-ops           → Show all available commands
+/career-ops {JD}      → AUTO-PIPELINE: evaluate + report + PDF + tracker (paste text or URL)
+/career-ops pipeline  → Process pending URLs from inbox (data/pipeline.md)
+/career-ops oferta    → Evaluation only A-F (no auto PDF)
+/career-ops ofertas   → Compare and rank multiple offers
+/career-ops contacto  → LinkedIn power move: find contacts + draft message
+/career-ops deep      → Deep research prompt about company
+/career-ops interview-prep → Generate company-specific interview prep doc
+/career-ops interview    → Interactive profile/CV onboarding interview
+/career-ops eu-swe    → Calibrate a European SWE application before CV/apply/interview
+/career-ops eu-fintech → Scan 21 EU fintech portals for Product Manager roles (zero-token)
+/career-ops interview/plan → Time-blocked prep plan for an upcoming interview
+/career-ops interview/practice → Practice interview, one question at a time with feedback
+/career-ops interview/debrief → Post-interview debrief: close gaps, predict next round
+/career-ops interview-redflag → Analyze employer warning signs before joining a company
+/career-ops pdf       → PDF only, ATS-optimized CV
+/career-ops text      → Tailored markdown CV (mirrors cv.md, no PDF)
+/career-ops latex     → Export CV as LaTeX/Overleaf .tex
+/career-ops latex-tex → Tailor your own resume.tex in place (opt-in; cv.md stays default)
+/career-ops cover     → Cover letter: standalone JD paste or /career-ops cover {slug}
+/career-ops email     → Formal application email draft (draft-only; never sends, submits, or clicks)
+/career-ops add       → Add a project/paper/role to your CV (fetch + preview + confirm)
+/career-ops expand    → Auto-discover and add missing competencies from profile links
+/career-ops training  → Evaluate course/cert against North Star
+/career-ops project   → Evaluate portfolio project idea
+/career-ops tracker   → Application status overview
+/career-ops agent-inbox → Queue/drain requests for the next session (data/agent-inbox.md)
+/career-ops apply     → Live application assistant (reads form + generates answers)
+/career-ops scan      → Scan portals and discover new offers
+/career-ops discover  → Resolve a company list to scannable ATS boards + append to portals.yml (zero-token)
+/career-ops batch     → Batch processing with parallel workers
+/career-ops patterns  → Analyze rejection patterns and improve targeting
+/career-ops offer-prep → Read a received offer/contract with the candidate: clause walk + lawyer questions (not legal advice)
+/career-ops titles    → Suggest adjacent job titles from your CV to broaden the search
+/career-ops upskill   → Aggregate skill-gap analysis from your evaluated reports
+/career-ops followup  → Follow-up cadence tracker: flag overdue, generate drafts
+/career-ops reply-watch → Classify employer replies and suggest tracker updates
+/career-ops outcome   → Record application outcome & archive artifacts
+/career-ops calibrate → Advisory report: do your evaluation scores predict your real outcomes? Reads /outcome data; never changes scoring
+/career-ops update    → Update career-ops system files with diff preview + compat check
 ```
 
 Or just paste a job URL or description directly -- career-ops auto-detects it and runs the full pipeline.
@@ -478,7 +503,7 @@ The Go dashboard TUI, Node.js scripts, and AI agent modes all automatically resp
 ## FAQ
 
 **What is career-ops?**
-career-ops is an open-source, CLI-agnostic job-search command center. It turns any AI coding CLI into a pipeline that evaluates job offers against your CV, generates ATS-tailored PDFs, finds the right person to contact, and tracks everything in one place — while you keep the final decision. It is the first reference implementation of the CareerOps Manifesto. More at [career-ops.org](https://career-ops.org).
+career-ops is an open-source AI job search that runs locally in your AI coding CLI (Claude Code, Codex, OpenCode and others) and leaves every decision to you. It evaluates job offers against your CV, generates ATS-tailored PDFs, finds the right person to contact, and tracks everything in one place: you always have the final call. It is the first reference implementation of the CareerOps Manifesto. More at [career-ops.org](https://career-ops.org).
 
 **Can I run career-ops for free, or on a cheaper / local model?**
 Yes. career-ops is CLI-agnostic and runs on free and local models — via OpenRouter free models, Ollama, or any OpenAI-compatible endpoint — so you are not tied to a paid subscription. See [docs/RUNNING_ON_A_BUDGET.md](docs/RUNNING_ON_A_BUDGET.md) for the full setup.
