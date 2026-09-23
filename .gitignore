@@ -417,9 +417,15 @@ reports/**/*.md
 !interview-prep/sessions/.gitkeep
 !interview-prep/sessions/README.md
 !writing-samples/README.md
-# update-system.mjs. Gitignored on purpose: it describes THIS clone, not the
-# project, and must survive the sync that overwrites update-system.mjs (#2421).
-config/local-paths.txt
+# FORK-LOCAL: upstream gitignores config/local-paths.txt (#2421) because it
+# describes one clone. This fork TRACKS it instead, and the ignore rule must
+# not come back. While it was ignored it existed only on one disk, so CI
+# checked out the repo without it, pdf-config.mjs read as an orphan there, and
+# validate-system-paths-coverage.mjs was red on every runner while passing
+# locally. v1.31.0's coverage check excludes LOCAL_PATHS_FILE from the
+# manifest, which is what lets a fork commit it. Leaving it both ignored and
+# tracked also trips tests/user-layer-untracked.test.mjs.
+# update-system.mjs re-appends this rule on every apply — delete it again.
 !web/package-lock.json
 !test-fixtures/**
 !documents/.gitkeep
