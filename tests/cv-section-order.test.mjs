@@ -1022,6 +1022,7 @@ ${sections.join('\n')}</div>
     // lib/page-format.mjs owns the paper size generate-pdf.mjs imports at
     // module scope, so the copy needs it for the same reason.
     copyFileSync(join(ROOT, 'lib', 'page-format.mjs'), join(sandbox, 'lib', 'page-format.mjs'));
+    copyFileSync(join(ROOT, 'lib', 'browser-launch.mjs'), join(sandbox, 'lib', 'browser-launch.mjs'));
     // pipeline-lock.mjs runs the shared lock protocol from lib/dir-lock.mjs (#5358).
     copyFileSync(join(ROOT, 'lib', 'dir-lock.mjs'), join(sandbox, 'lib', 'dir-lock.mjs'));
     copyFileSync(join(ROOT, 'lib', 'yaml-document.mjs'), join(sandbox, 'lib', 'yaml-document.mjs'));
@@ -1173,6 +1174,7 @@ export const chromium = {
     // lib/page-format.mjs owns the paper size generate-pdf.mjs imports at
     // module scope, so the copy needs it for the same reason.
     copyFileSync(join(ROOT, 'lib', 'page-format.mjs'), join(sandbox, 'lib', 'page-format.mjs'));
+    copyFileSync(join(ROOT, 'lib', 'browser-launch.mjs'), join(sandbox, 'lib', 'browser-launch.mjs'));
     // pipeline-lock.mjs runs the shared lock protocol from lib/dir-lock.mjs (#5358).
     copyFileSync(join(ROOT, 'lib', 'dir-lock.mjs'), join(sandbox, 'lib', 'dir-lock.mjs'));
     copyFileSync(join(ROOT, 'lib', 'yaml-document.mjs'), join(sandbox, 'lib', 'yaml-document.mjs'));

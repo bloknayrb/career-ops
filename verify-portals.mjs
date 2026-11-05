@@ -47,6 +47,8 @@ import { fileURLToPath } from 'url';
 import { loadYaml } from './lib/yaml-document.mjs';
 
 import { fetchJson as defaultFetchJson, fetchTextHead as defaultFetchText, makeHttpCtx } from './providers/_http.mjs';
+import { ASHBY_TIMEOUT_MS } from './providers/ashby.mjs';
+import { LEVER_TIMEOUT_MS } from './providers/lever.mjs';
 import { isBlockedAddress } from './providers/_ip-guard.mjs';
 
 // The portal probes are the one place that keeps following redirects: they hit
@@ -111,6 +113,8 @@ const PROVIDERS_DIR = resolve(dirname(fileURLToPath(import.meta.url)), 'provider
 // How to turn a slug into a probe URL, and where the job list lives in the
 // response, for each supported ATS. Greenhouse/Ashby wrap jobs in `{ jobs }`;
 // Lever returns a bare array. `includeCompensation` mirrors the ashby provider.
+// `timeoutMs` is the one the provider fetches the same board with, so a board
+// `scan` reads is not reported unreachable here (none: _http.mjs's default).
 export const ATS = {
   greenhouse: {
     probeUrl: (slug) =>
@@ -126,6 +130,7 @@ export const ATS = {
   ashby: {
     probeUrl: (slug) =>
       `https://api.ashbyhq.com/posting-api/job-board/${slug}?includeCompensation=true`,
+    timeoutMs: ASHBY_TIMEOUT_MS,
     jobCount: (json) => (Array.isArray(json?.jobs) ? json.jobs.length : null),
     // The posting API returns only {jobs, apiVersion}; the board page titles
     // itself with the owner ('deepset Jobs'), which is the only name either
@@ -138,6 +143,7 @@ export const ATS = {
     // EU boards (jobs.eu.lever.co) resolve to api.eu.lever.co, mirroring the
     // provider's resolveApiUrl; the default is the base instance.
     probeUrl: (slug, { eu = false } = {}) => `https://api.${eu ? 'eu.' : ''}lever.co/v0/postings/${slug}`,
+    timeoutMs: LEVER_TIMEOUT_MS,
     jobCount: (json) => (Array.isArray(json) ? json.length : null),
     ownerUrl: (slug, { eu = false } = {}) => `https://jobs.${eu ? 'eu.' : ''}lever.co/${slug}`,
     ownerKind: 'html',
@@ -286,7 +292,8 @@ const AGGREGATOR_HOSTS = [
   'greenhouse.io', 'ashbyhq.com', 'lever.co', 'myworkdayjobs.com', 'workday.com',
   'smartrecruiters.com', 'jobvite.com', 'icims.com', 'bamboohr.com', 'gem.com',
   'recruitee.com', 'teamtailor.com', 'personio.com', 'workable.com', 'breezy.hr',
-  'linkedin.com', 'indeed.com', 'glassdoor.com', 'ycombinator.com', 'wellfound.com',
+  'paylocity.com', 'join.com', 'linkedin.com', 'indeed.com', 'glassdoor.com',
+  'ycombinator.com', 'wellfound.com',
 ];
 
 /** Subdomain labels that describe a careers site rather than the company. */
@@ -508,7 +515,7 @@ export async function probeSlug(
     };
   const url = spec.probeUrl(slug, { eu });
   try {
-    const json = await fetchJson(url);
+    const json = await fetchJson(url, spec.timeoutMs ? { timeoutMs: spec.timeoutMs } : undefined);
     const count = spec.jobCount(json);
     if (count == null)
       return {
@@ -833,69 +840,80 @@ export async function probeProvider(entry, provider, baseCtx) {
  *      uses (Workday, SuccessFactors, SmartRecruiters, Avature, …), bounded to
  *      a few requests. This catches broken non-ATS boards that used to be
  *      reported as an un-actionable "skipped".
- * An entry reaches `skipped` only when no provider claims it. Probing is
- * sequential to stay gentle on rate limits.
+ * An entry reaches `skipped` only when no provider claims it. Entries are
+ * probed through a small bounded pool (`concurrency`, 6 by default, the same
+ * width audit-portals.mjs uses on these boards): one entry at a time made a
+ * large portals.yml outlast the web Portals page's 110 s budget, so the health
+ * check timed out instead of naming the broken boards. Rows keep input order.
  *
  * @param {Array<object>} companies - portals.yml entries (tracked_companies and/or job_boards).
- * @param {{fetchJson?: Function, providers?: Map, httpCtx?: object}} [deps]
+ * @param {{fetchJson?: Function, providers?: Map, httpCtx?: object, concurrency?: number}} [deps]
  *   `providers`/`httpCtx` enable tier 2; omit them (as the ATS unit tests do) to
  *   get tier-1-only behavior where non-ATS entries stay `skipped`.
  * @returns {Promise<Array<object>>} One result row per entry.
  */
 export async function verifyCompanies(
   companies,
-  { fetchJson = probeFetchJson, fetchText = probeFetchText, providers = null, httpCtx = null } = {},
+  { fetchJson = probeFetchJson, fetchText = probeFetchText, providers = null, httpCtx = null, concurrency = 6 } = {},
 ) {
-  const list = Array.isArray(companies) ? companies : [];
-  const results = [];
-  for (const company of list) {
-    if (!company || typeof company !== 'object') continue;
-    if (company.enabled === false) continue;
-    const name = typeof company.name === 'string' ? company.name : '(unnamed)';
-    const match =
-      parseAtsSlug(company.api) || parseAtsSlug(company.careers_url);
-    // An Ashby entry that opts into the embed source (`ashby: { embed: true }`)
-    // is one whose posting API is disabled. Tier 1 probes exactly that API, so
-    // it would report a live board as a wrong slug; the provider layer below
-    // reads the embed page instead.
-    const embedOnly = match?.ats === 'ashby' && /** @type {any} */ (company).ashby?.embed === true;
-    if (match && !embedOnly) {
-      const probe = await probeSlug(match.ats, match.slug, { fetchJson, eu: match.eu });
-      if (probe.status === 'live' || probe.status === 'empty') {
-        results.push({ name, ...probe });
-        continue;
-      }
-      // Wrong slug or ATS migration — cross-probe only for slug/unknown failures.
-      if (probe.errorKind === 'slug_gone' || probe.errorKind === 'unknown') {
-        const suggested = await discoverAlternates(name, { fetchJson, fetchText });
-        if (suggested) {
-          results.push({ name, ...probe, suggested });
-          continue;
-        }
-      }
-      results.push({ name, ...probe });
-      continue;
+  const list = (Array.isArray(companies) ? companies : []).filter(
+    (c) => c && typeof c === 'object' && c.enabled !== false,
+  );
+  const rows = new Array(list.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < list.length) {
+      const i = next++;
+      rows[i] = await verifyOne(list[i], { fetchJson, fetchText, providers, httpCtx });
     }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency, list.length)) }, worker));
+  return rows;
+}
 
-    // Tier 2: hand the entry to the scanner's provider layer. Skip the
-    // local-parser provider — a health check must stay network-only and never
-    // execute a configured local command.
-    if (providers && providers.size > 0) {
-      const resolved = resolveProvider(company, providers, { skipIds: ['local-parser'] });
-      if (resolved && resolved.provider) {
-        const probe = await probeProvider(company, resolved.provider, httpCtx || makeHttpCtx());
-        results.push({ name, ...probe });
-        continue;
-      }
+/**
+ * One health row for one enabled entry; the body of verifyCompanies' pool.
+ *
+ * @param {object} company
+ * @param {{fetchJson: Function, fetchText: Function, providers: Map|null, httpCtx: object|null}} deps
+ * @returns {Promise<object>}
+ */
+async function verifyOne(company, { fetchJson, fetchText, providers, httpCtx }) {
+  const name = typeof company.name === 'string' ? company.name : '(unnamed)';
+  const match =
+    parseAtsSlug(company.api) || parseAtsSlug(company.careers_url);
+  // An Ashby entry that opts into the embed source (`ashby: { embed: true }`)
+  // is one whose posting API is disabled. Tier 1 probes exactly that API, so
+  // it would report a live board as a wrong slug; the provider layer below
+  // reads the embed page instead.
+  const embedOnly = match?.ats === 'ashby' && /** @type {any} */ (company).ashby?.embed === true;
+  if (match && !embedOnly) {
+    const probe = await probeSlug(match.ats, match.slug, { fetchJson, eu: match.eu });
+    if (probe.status === 'live' || probe.status === 'empty') return { name, ...probe };
+    // Wrong slug or ATS migration — cross-probe only for slug/unknown failures.
+    if (probe.errorKind === 'slug_gone' || probe.errorKind === 'unknown') {
+      const suggested = await discoverAlternates(name, { fetchJson, fetchText });
+      if (suggested) return { name, ...probe, suggested };
     }
-
-    results.push({
-      name,
-      status: 'skipped',
-      reason: 'no provider matched careers_url or api',
-    });
+    return { name, ...probe };
   }
-  return results;
+
+  // Tier 2: hand the entry to the scanner's provider layer. Skip the
+  // local-parser provider — a health check must stay network-only and never
+  // execute a configured local command.
+  if (providers && providers.size > 0) {
+    const resolved = resolveProvider(company, providers, { skipIds: ['local-parser'] });
+    if (resolved && resolved.provider) {
+      const probe = await probeProvider(company, resolved.provider, httpCtx || makeHttpCtx());
+      return { name, ...probe };
+    }
+  }
+
+  return {
+    name,
+    status: 'skipped',
+    reason: 'no provider matched careers_url or api',
+  };
 }
 
 /**
