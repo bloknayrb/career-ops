@@ -175,7 +175,7 @@ const CLOSURE = {
     'generate-pdf.mjs', 'path-resolver.mjs', 'tracker-utils.mjs', 'pipeline-lock.mjs', 'lib/dir-lock.mjs',
     'tracker-parse.mjs', 'theme-style.mjs', 'lib/page-format.mjs', 'lib/is-main-module.mjs', 'lib/yaml-document.mjs',
     'lib/browser-launch.mjs',
-    'cv-sections-core.mjs', 'cv-experience-order.mjs',
+    'cv-sections-core.mjs', 'cv-experience-order.mjs', 'lib/local-today.mjs',
     // FORK-LOCAL: this fork's generate-pdf.mjs imports pdf-config.mjs for the
     // shared page margin and assertPdfContentCoverage. Upstream has no such
     // module, so re-apply this entry whenever this file is reconciled.

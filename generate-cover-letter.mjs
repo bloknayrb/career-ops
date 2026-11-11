@@ -814,36 +814,16 @@ function collectInputText(value) {
   return [];
 }
 
-/** Parse a payload, run the fact and voice gates, and render the cover-letter PDF. */
-async function main() {
-  const { values: args } = parseArgs({
-    options: {
-      payload:        { type: "string" },
-      markdown:       { type: "string" },
-      meta:           { type: "string" },
-      "verify-prose": { type: "string" },
-      "max-pages":    { type: "string" },
-      format:         { type: "string" },
-      country:        { type: "string" },
-      out:            { type: "string" },
-      report:         { type: "string" },
-      // Must be declared here even though strict:false. parseArgs tolerates
-      // unknown flags but does not populate `values` for them, so an undeclared
-      // --voice-ack would land in positionals and read as undefined forever.
-      "voice-ack":    { type: "string" },
-      help:           { type: "boolean", short: "h" },
-    },
-    strict: false,
-  });
+/** A cover letter is one page by convention; a CV's default budget is 2. */
+export const DEFAULT_COVER_MAX_PAGES = 1;
 
-  if (args.help || (!args.payload && !args.markdown)) {
-    console.log(`
+const USAGE = `
 Usage:
   PROSE MODE (preferred — the approved .md is what ships):
-    node generate-cover-letter.mjs --markdown output/cover-letter-x.md --meta payload.json [--out output/path.pdf] [--format letter|a4] [--country XX] [--report NNN]
+    node generate-cover-letter.mjs --markdown output/cover-letter-x.md --meta payload.json [--out output/path.pdf] [--format letter|a4] [--country XX] [--report NNN] [--max-pages N]
 
   PAYLOAD MODE (legacy — prose re-keyed into template slots):
-    node generate-cover-letter.mjs --payload payload.json [--out output/path.pdf] [--format letter|a4] [--country XX] [--report NNN]
+    node generate-cover-letter.mjs --payload payload.json [--out output/path.pdf] [--format letter|a4] [--country XX] [--report NNN] [--max-pages N]
     node generate-cover-letter.mjs --payload payload.json --verify-prose output/cover-letter-x.md
 
   --markdown       Approved cover-letter .md. Its paragraphs (between the
@@ -853,34 +833,108 @@ Usage:
                    company, city, date). An existing payload file works as-is;
                    its prose slots are ignored. Defaults to --payload if given.
   --payload        Path to the JSON payload file (payload mode).
-  --verify-prose   Approved .md to check the payload's prose against. Use this
-                   if you must stay on payload mode: it fails the render when
-                   the payload has drifted from the audited letter.
-  --max-pages      Page limit; default 1. Over the limit the PDF is deleted and
-                   the run fails. Raise it only when a longer letter is
-                   intended, never to make an over-long draft render.
+  --verify-prose   Approved .md to check the payload's prose against.
+  --voice-ack      Acknowledge a voice-lint finding (see runVoiceLint).
+  --max-pages      Preferred letter length in pages (default: ${DEFAULT_COVER_MAX_PAGES}). Over it,
+                   nothing is written to the output path; the render goes to a
+                   sibling .overflow.pdf draft to trim from.
+  --strict-pages   Fail instead of warning when the letter is longer than --max-pages.
   --format         Paper size (letter|a4). Defaults to the payload's format,
-                   then config/profile.yml page_format, then letter. A4 is
-                   narrower and 18mm taller, so a letter that fits one A4 page
-                   can spill to two on US Letter.
+                   then config/profile.yml page_format, then letter.
   --country        Employer's ISO 3166-1 country code (e.g. DE). Picks the sheet
                    only when page_format is "auto". Defaults to the payload's country.
   --out            Override output path (optional).
   --report         Link the PDF to a tracker report number in data/pdf-index.tsv.
-`);
-    process.exit(args.help ? 0 : 1);
+`;
+
+/**
+ * Parse and validate the CLI flags.
+ *
+ * Strict on purpose (#6373). With `strict: false` an unknown flag (a typo, or
+ * --max-pages / --strict-pages, which this script did not declare) was dropped
+ * without a word, and a string flag given no value swallowed the next flag:
+ * `--report --out x.pdf` set report to "--out" and wrote the PDF to the
+ * default path. Every case is now an error that names the flag.
+ *
+ * @param {string[]} argv
+ * @returns {{ ok: true, args: object } | { ok: false, error: string }}
+ */
+export function parseCoverArgs(argv) {
+  let values;
+  try {
+    ({ values } = parseArgs({
+      args: argv,
+      options: {
+        payload:        { type: "string" },
+        // FORK-LOCAL: prose mode and the voice gate.
+        markdown:       { type: "string" },
+        meta:           { type: "string" },
+        "verify-prose": { type: "string" },
+        "voice-ack":    { type: "string" },
+        out:            { type: "string" },
+        format:         { type: "string" },
+        country:        { type: "string" },
+        report:         { type: "string" },
+        "max-pages":    { type: "string" },
+        "strict-pages": { type: "boolean" },
+        help:           { type: "boolean", short: "h" },
+      },
+      strict: true,
+      allowPositionals: false,
+    }));
+  } catch (err) {
+    return { ok: false, error: err.message };
   }
+  if (values.help) return { ok: true, args: values };
 
   // Supplied flags are validated like generate-pdf.mjs does. A typo that fell
   // through to the profile or the payload would print a letter on the wrong sheet.
   // `auto` is a profile or payload value, never a sheet, so --format rejects it.
-  if (args.format !== undefined && !normalizePageFormat(args.format)) {
-    console.error(`Invalid format "${args.format}". Use: ${[...PAGE_FORMATS].join(", ")}`);
+  if (values.format !== undefined && !normalizePageFormat(values.format)) {
+    return { ok: false, error: `Invalid format "${values.format}". Use: ${[...PAGE_FORMATS].join(", ")}` };
+  }
+  if (values.country !== undefined && !pageFormatForCountry(values.country)) {
+    return { ok: false, error: `Invalid country "${values.country}". Use a two-letter ISO 3166-1 code, e.g. --country=DE.` };
+  }
+  // Checked as typed, not trimmed: `--report=' 42 '` is not a report number.
+  if (values.report !== undefined && !/^\d+$/.test(values.report)) {
+    return { ok: false, error: `Invalid --report "${values.report}". Use a numeric report number, e.g. --report=42.` };
+  }
+  // An empty --out= would otherwise be read as "not given" by main(), which
+  // then writes to the payload's own destination: a flag the caller typed,
+  // silently ignored.
+  if (values.out !== undefined && values.out.trim() === "") {
+    return { ok: false, error: 'Invalid --out "". Give a path inside output/, e.g. --out output/acme-cover.pdf.' };
+  }
+  const maxPagesInput = values["max-pages"];
+  const maxPages = maxPagesInput === undefined ? DEFAULT_COVER_MAX_PAGES : Number(maxPagesInput);
+  if (!Number.isInteger(maxPages) || maxPages < 1) {
+    return { ok: false, error: `Invalid --max-pages "${maxPagesInput}". Use a positive integer, e.g. --max-pages=1.` };
+  }
+  return {
+    ok: true,
+    args: {
+      ...values,
+      report: values.report,
+      maxPages,
+      strictPages: Boolean(values["strict-pages"]),
+    },
+  };
+}
+
+/** Parse a payload, run the fact and voice gates, and render the cover-letter PDF. */
+async function main() {
+  const parsed = parseCoverArgs(process.argv.slice(2));
+  if (!parsed.ok) {
+    console.error(parsed.error);
+    console.error(USAGE);
     process.exit(1);
   }
-  if (args.country !== undefined && !pageFormatForCountry(args.country)) {
-    console.error(`Invalid country "${args.country}". Use a two-letter ISO 3166-1 code, e.g. --country=DE.`);
-    process.exit(1);
+  const args = parsed.args;
+
+  if (args.help || (!args.payload && !args.markdown)) {
+    console.log(USAGE);
+    process.exit(args.help ? 0 : 1);
   }
 
   const metaPath = resolve(args.meta || args.payload || "");
@@ -997,48 +1051,28 @@ Usage:
       console.error(`CV fact check warning: cover letter`);
       printFactWarnings(printedWarnings, console.error);
     }
-    // A cover letter that spills onto page 2 is a defect, and it is one a human
-    // only catches by opening the PDF. Fail on it: the fix is cutting the letter
-    // (and re-auditing the cut), never tightening the CSS until it fits.
-    // strictPages makes generate-pdf.mjs throw on overflow *before* it publishes
-    // the data/pdf-index.tsv entry, so a rejected draft never enters the
-    // manifest; the catch then removes the file so it cannot be attached later.
-    const maxPagesRaw = Number(args["max-pages"] ?? 1);
-    const maxPages = Number.isInteger(maxPagesRaw) && maxPagesRaw > 0 ? maxPagesRaw : 1;
-    try {
-      await renderHtmlToPdf(printed, outputPath, {
-        // Passed through unresolved. renderHtmlToPdf ranks it against the user's
-        // config/profile.yml, so a cover letter and its CV cannot end up on
-        // different paper because only one of them carried a flag.
-        format: args.format ?? payload.format,
-        country: args.country || payload.country,
-        maxPages,
-        strictPages: true,
-        reportNum: args.report,
-        // Declared, never inferred: this script always renders a cover letter, and
-        // the manifest must not file it as the report's CV (#3887).
-        kind: 'cover',
-        inputPath: metaPath,
-      });
-    } catch (err) {
-      // Never leave a rejected draft on disk: a letter that fails here is one a
-      // human can still find and attach.
-      const removed = existsSync(outputPath);
-      rmSync(outputPath, { force: true });
-      const note = removed ? `\nRemoved ${payload.output_path}.` : "";
-      // Only the page budget is fixed by cutting the letter. Appending that
-      // advice to an unrelated render failure sends the reader after the wrong bug.
-      const overflowed = /allowed maximum is/.test(err.message);
-      err.message =
-        `${err.message}${note}` +
-        (overflowed
-          ? ` Shorten the letter and re-run the audit gates on the shortened prose, ` +
-            `or pass --max-pages N if a longer letter is intended.`
-          : "");
-      throw err;
+    const result = await renderHtmlToPdf(printed, outputPath, {
+      // Passed through unresolved. renderHtmlToPdf ranks it against the user's
+      // config/profile.yml, so a cover letter and its CV cannot end up on
+      // different paper because only one of them carried a flag.
+      format: args.format ?? payload.format,
+      country: args.country || payload.country,
+      reportNum: args.report,
+      maxPages: args.maxPages,
+      strictPages: args.strictPages,
+      // Declared, never inferred: this script always renders a cover letter, and
+      // the manifest must not file it as the report's CV (#3887).
+      kind: 'cover',
+      inputPath: metaPath,
+    });
+    // A render over a warn-only page budget returns the sibling draft it
+    // wrote instead and leaves the output path as it was (#6377); saying the
+    // PDF is there would hand over a file that was never written.
+    if (result.draftPath) {
+      console.log(`\nCover letter over its page budget: nothing was written to ${payload.output_path}; the draft is ${result.draftPath}. Trim and rerun.`);
+    } else {
+      console.log(`\nCover letter PDF: ${payload.output_path}`);
     }
-
-    console.log(`\nCover letter PDF: ${payload.output_path}`);
   } catch (err) {
     console.error("ERROR generating cover letter PDF:");
     console.error(err.message);
