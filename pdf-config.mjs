@@ -11,7 +11,8 @@
  * be a single source of truth in name only.
  *
  * The check is a CONTENT-COVERAGE assertion, not a footer heuristic: every
- * non-whitespace character of the rendered document.body.innerText must appear,
+ * non-whitespace character of the rendered document.body.innerText (plus the
+ * CSS generated content Chromium prints, see captureRenderedBodyText) must appear,
  * in order, in the concatenated text layer of ALL PDF pages. Squashing
  * whitespace makes page boundaries invisible, so content that merely reflows
  * onto another page still passes, while content Chromium clipped past the
@@ -73,10 +74,12 @@ export function normalizePdfText(text) {
  * both sides speak the same alphabet. It is applied to BOTH sides, so it can
  * never make absent content appear.
  *
- * List markers are dropped for the same reason. A CSS-generated marker
- * (`li::before { content: "\2022" }`, as in templates/cover-letter-template.html)
- * is painted into the PDF's text layer but is absent from the DOM's innerText,
- * which captureRenderedBodyText() uses to build the expected string. Because
+ * List markers are dropped for the same reason. A list marker is painted into
+ * the PDF's text layer but can be absent from the expected string: a native
+ * `::marker` never reaches innerText, and before captureRenderedBodyText()
+ * learned to include generated content, neither did a CSS-generated one
+ * (`li::before { content: "\2022" }`, as in templates/cover-letter-template.html).
+ * The strip stays for native markers and costs nothing for generated ones. Because
  * assertPdfContentCoverage() needs a CONTIGUOUS match, each injected marker
  * splits the expected run and the check fails, reporting the letter as clipped
  * when nothing was clipped at all. Any cover letter following modes/cover.md
@@ -104,6 +107,21 @@ export function squashPdfText(text) {
  * because it returns rendered text: it honours display:none and reflects the
  * document as laid out.
  *
+ * FORK-LOCAL (generated content): innerText leaves out CSS generated content,
+ * but Chromium paints `::before`/`::after` strings into the PDF's text layer.
+ * Since v1.40.0 templates/cv-template.html draws its contact-row separators as
+ * `::after { content: "|" }`, so the PDF read `+15550100|candidate@…` while
+ * innerText read `+15550100candidate@…`, and every CV render failed the
+ * contiguous match as "clipped". The expected text therefore has to be what
+ * the browser prints, not what the DOM holds: each rendered pseudo-element
+ * whose content resolves to plain text is materialised as a temporary text
+ * node in its true position, innerText is read, and the nodes are removed
+ * again inside the same synchronous evaluate (no paint happens in between, so
+ * the PDF rendered afterwards is untouched). This only ADDS expected text, so
+ * it cannot make clipped content pass; genuinely clipped generated content now
+ * fails too. Content the capture cannot resolve (counter(), url(), quotes) is
+ * left out, exactly as before this patch. Re-apply after every upstream update.
+ *
  * @param {import('playwright').Page} page - Page with the document loaded.
  * @returns {Promise<{text: string, isRtl: boolean}>}
  */
@@ -111,7 +129,59 @@ export async function captureRenderedBodyText(page) {
   return page.evaluate(() => {
     const rtl = getComputedStyle(document.body).direction === 'rtl' ||
       [...document.body.querySelectorAll('*')].some((el) => getComputedStyle(el).direction === 'rtl');
-    return { text: document.body.innerText || '', isRtl: rtl };
+
+    // Resolve a computed `content` value to the text it paints, or null when
+    // it holds anything other than strings and attr() (counters, images,
+    // open/close-quote), which this capture does not model.
+    const resolveContent = (value, el) => {
+      if (!value || value === 'none' || value === 'normal') return null;
+      // `content: "x" / "alt text"` paints only the part before the slash.
+      const tokens = value.match(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|attr\([^)]*\)|\/|\S+/g) || [];
+      let out = '';
+      for (const token of tokens) {
+        if (token === '/') break;
+        if (token[0] === '"' || token[0] === "'") {
+          // Chromium serialises control characters as hex escapes (`"\A"`
+          // comes back as `"\a "`), so decode those before the one-character
+          // escapes (`\"`, `\\`), or `\a` would read as a literal "a".
+          out += token.slice(1, -1).replace(/\\([0-9a-fA-F]{1,6})\s?|\\(.)/g,
+            (_, hex, ch) => (hex ? String.fromCodePoint(parseInt(hex, 16)) : ch));
+        } else if (token.startsWith('attr(')) {
+          out += el.getAttribute(token.slice(5, -1).trim()) || '';
+        } else {
+          return null;
+        }
+      }
+      return out || null;
+    };
+
+    // Two passes: read every pseudo-element first, insert afterwards. Inserting
+    // while reading would change :last-child / :empty / :only-child matches for
+    // elements not yet read, and they would report content that never printed.
+    const found = [];
+    for (const el of document.body.querySelectorAll('*')) {
+      for (const pseudo of ['::before', '::after']) {
+        const style = getComputedStyle(el, pseudo);
+        if (style.display === 'none' || style.visibility !== 'visible') continue;
+        const text = resolveContent(style.content, el);
+        if (text) found.push({ el, pseudo, text, textTransform: style.textTransform });
+      }
+    }
+
+    const inserted = [];
+    try {
+      for (const { el, pseudo, text, textTransform } of found) {
+        const span = document.createElement('span');
+        span.textContent = text;
+        span.style.textTransform = textTransform;
+        if (pseudo === '::before') el.insertBefore(span, el.firstChild);
+        else el.appendChild(span);
+        inserted.push(span);
+      }
+      return { text: document.body.innerText || '', isRtl: rtl };
+    } finally {
+      for (const span of inserted) span.remove();
+    }
   });
 }
 
