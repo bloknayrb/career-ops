@@ -12,6 +12,10 @@
  *   node test-all.mjs --only <substring>      # Run ONLY discovered tests/**\/*.test.mjs
  *                                             # files whose path contains <substring>
  *                                             # (e.g. --only providers/themuse).
+ *   node test-all.mjs --needs <tool,...>      # Run ONLY discovered suites that declare one of
+ *                                             # these tools (browser, latex), with the tool
+ *                                             # required: a suite that would skip without it
+ *                                             # fails instead. See tests/required-tools.mjs.
  *   node test-all.mjs --jobs <N>              # Run at most N discovered suites at a time,
  *                                             # one process each. Default: every available
  *                                             # CPU, or CAREER_OPS_TEST_JOBS when set.
@@ -20,15 +24,19 @@
  *                                             # below run at the same time as the
  *                                             # discovered suites, in one of the N slots.
  *
+ *   A full run (anything but --only) waits for any other full run on this
+ *   machine to finish first; CAREER_OPS_TEST_QUEUE=0 skips the wait. See
+ *   lib/test-queue.mjs.
+ *
  *   `--inline-child <result.json>` is how a run with more than one job starts
  *   those inline sections in a process of their own. It is not a way to run
  *   part of the suite: it prints no summary and its exit code says nothing
  *   about what failed.
  *
- *   LOUD WARNING: `--only` runs ONLY discovered tests/ files — every inline
- *   core section above (syntax, scripts, dashboard, data contract, personal
- *   data, paths, etc.) is SKIPPED. A green `--only` run is NOT a green
- *   suite. Always run the full suite (no flags) before pushing.
+ *   LOUD WARNING: `--only` and `--needs` run ONLY discovered tests/ files —
+ *   every inline core section above (syntax, scripts, dashboard, data
+ *   contract, personal data, paths, etc.) is SKIPPED. A green `--only` run
+ *   is NOT a green suite. Always run the full suite (no flags) before pushing.
  *
  * NEW TESTS GO IN A FILE OF THEIR OWN, NOT IN A SECTION HERE.
  * Node tests matching tests/**\/*.test.mjs are auto-discovered — no
@@ -68,8 +76,9 @@ import { join, dirname, basename, relative, delimiter } from 'path';
 import { tmpdir, availableParallelism } from 'os';
 import { fileURLToPath, pathToFileURL } from 'url';
 import * as yaml from 'js-yaml';
-import { pass, fail, warn, run, runAcrossUtcDay, runAcrossLocalDay, lastRunFailure, formatRunFailure, fileExists, finish, results, absorbResults, importSuiteContained, linkNodeModules, ROOT, QUICK, NODE, DEFAULT_SCRIPT_TIMEOUT_MS, getBash, toBashPath, hermeticGitEnv, pinSandboxDataRoot, exitOnInterrupt, ownRootEnv } from './tests/helpers.mjs';
+import { pass, fail, warn, stripJsComments, run, runRejects, runAcrossUtcDay, runAcrossLocalDay, lastRunFailure, formatRunFailure, fileExists, finish, results, absorbResults, importSuiteContained, linkNodeModules, ROOT, QUICK, NODE, DEFAULT_SCRIPT_TIMEOUT_MS, getBash, toBashPath, hermeticGitEnv, pinSandboxDataRoot, exitOnInterrupt, ownRootEnv } from './tests/helpers.mjs';
 import { flagValue, hasFlag } from './lib/cli-flags.mjs';
+import { REQUIRED_TOOL_ENV, declaresTool } from './tests/required-tools.mjs';
 import { collectMjsFiles } from './lib/mjs-files.mjs';
 import { checkSyntax, NODE_CHECK_TIMEOUT_MS } from './lib/syntax-check.mjs';
 import { walkTree, listTree } from './lib/walk-tree.mjs';
@@ -78,6 +87,7 @@ import { childFailureExcerpt } from './lib/failure-excerpt.mjs';
 import { SCRATCH_PREFIX, markScratchOwner, sweepScratchDirs } from './lib/scratch-dirs.mjs';
 import { MARKER_FILE } from './tests/data-root-guard.mjs';
 import { getCareerOpsRoot } from './path-resolver.mjs';
+import { holdTestQueue } from './lib/test-queue.mjs';
 
 /**
  * Read a repo-relative text file as UTF-8.
@@ -285,15 +295,22 @@ function reportNodeTestSuite(rel, ok, stdout, detail, how) {
   }
 }
 
-async function runDiscovered(filter = null) {
+async function runDiscovered(filter = null, tools = null) {
   let files = discoverTests(TESTS_DIR);
   if (filter) {
     const norm = (p) => p.slice(TESTS_DIR.length + 1).replace(/\\/g, '/');
     files = files.filter((f) => norm(f).includes(filter));
   }
+  if (tools) {
+    files = files.filter((f) => {
+      const src = stripJsComments(readFileSync(f, 'utf-8'));
+      return tools.some((tool) => declaresTool(src, tool));
+    });
+  }
   if (files.length === 0) {
     // Fail hard: a path typo must never silently turn CI green.
-    console.log(`  ❌ no test files matched${filter ? ` --only "${filter}"` : ''} under tests/`);
+    const what = [filter && `--only "${filter}"`, tools && `--needs ${tools.join(',')}`].filter(Boolean).join(' ');
+    console.log(`  ❌ no test files matched${what ? ` ${what}` : ''} under tests/`);
     process.exit(1);
   }
   // One file gains nothing from a child process, and --jobs 1 is the original
@@ -317,7 +334,13 @@ async function runDiscovered(filter = null) {
     }
     if (kind === 'node-test') {
       const out = run(NODE, ['--test', f]);
-      reportNodeTestSuite(rel, out !== null, out ?? '', lastRunFailure(), `exit ${lastRunFailure()?.status ?? '?'}`);
+      const failure = lastRunFailure();
+      // run()'s timeout is DEFAULT_SCRIPT_TIMEOUT_MS. Said the way the parallel
+      // loop says it, since a killed suite has no exit status to print.
+      const how = failure?.code === 'ETIMEDOUT'
+        ? `killed after ${DEFAULT_SCRIPT_TIMEOUT_MS / 1000}s`
+        : `exit ${failure?.status ?? '?'}`;
+      reportNodeTestSuite(rel, out !== null, out ?? '', failure, how);
       continue;
     }
     await importSuiteContained(f, rel);
@@ -689,6 +712,32 @@ const JOBS = (() => {
 process.env.CAREER_OPS_TEST_JOBS = '1';
 
 const ONLY = hasFlag(process.argv, '--only') ? (flagValue(process.argv, '--only') ?? '') : null;
+
+// `--needs browser,latex`: only the discovered suites that declare one of these
+// tools (tests/required-tools.mjs), with the tool REQUIRED, so a suite that
+// would skip for lack of it fails instead (#5756, #5758). Run where the tools
+// are installed: the tool-suites CI job, in the cv-visual image. Composes with
+// --only. Like --only, it skips every inline section.
+const NEEDS = hasFlag(process.argv, '--needs') ? (flagValue(process.argv, '--needs') ?? '') : null;
+if (NEEDS !== null) {
+  const tools = NEEDS.split(',').map((t) => t.trim()).filter(Boolean);
+  const unknown = tools.filter((t) => !Object.hasOwn(REQUIRED_TOOL_ENV, t));
+  if (tools.length === 0 || NEEDS.startsWith('--') || unknown.length) {
+    console.log(`  ❌ --needs takes a comma-separated list of: ${Object.keys(REQUIRED_TOOL_ENV).join(', ')}${unknown.length ? ` (got "${unknown.join('", "')}")` : ''}`);
+    process.exit(1);
+  }
+  if (ONLY !== null && (ONLY === '' || ONLY.startsWith('--'))) {
+    console.log('  ❌ --only requires a path substring, e.g. --only providers/themuse');
+    process.exit(1);
+  }
+  // Set before any suite starts: children inherit it, and toolRequired()
+  // reads it on every call in this process.
+  for (const tool of tools) process.env[REQUIRED_TOOL_ENV[tool]] = '1';
+  console.log(`\n🧪 career-ops test suite (--needs ${tools.join(',')}${ONLY ? ` --only ${ONLY}` : ''})\n`);
+  await runDiscovered(ONLY || null, tools);
+  finish();
+}
+
 if (ONLY !== null) {
   if (ONLY === '' || ONLY.startsWith('--')) {
     console.log('  ❌ --only requires a path substring, e.g. --only providers/themuse');
@@ -697,6 +746,19 @@ if (ONLY !== null) {
   console.log('\n🧪 career-ops test suite (--only ' + ONLY + ')\n');
   await runDiscovered(ONLY);
   finish();
+}
+
+// From here on this is a full run, and full runs take turns: two at once on one
+// machine each get half its cores and overrun their timeouts. See
+// lib/test-queue.mjs. Not in the inline sections' child, whose parent holds the
+// queue already.
+if (INLINE_CHILD === null) {
+  try {
+    await holdTestQueue();
+  } catch (err) {
+    console.log(`  ❌ ${err.message}`);
+    process.exit(1);
+  }
 }
 
 // More than one job: the inline sections go to a child and the discovered
@@ -841,6 +903,7 @@ const scripts = [
   { name: 'process-quality.mjs --self-test', expectExit: 0 },
   { name: 'company-history.mjs --self-test', expectExit: 0 },
   { name: 'rejection-latency.mjs --self-test', expectExit: 0 },
+  { name: 'role-clarity.mjs --self-test', expectExit: 0 },
   { name: 'salary-gap.mjs --self-test', expectExit: 0 },
   { name: 'negotiation-roi.mjs --self-test', expectExit: 0 },
   { name: 'funnel-velocity.mjs --self-test', expectExit: 0 },
@@ -850,6 +913,7 @@ const scripts = [
   { name: 'build-cv-html.mjs --test', expectExit: 0 },
   { name: 'jd-skill-gap.mjs --self-test', expectExit: 0 },
   { name: 'story-provenance-check.mjs --self-test', expectExit: 0 },
+  { name: 'sponsor-check.mjs --self-test', expectExit: 0 },
   { name: 'cv-title-check.mjs --self-test', expectExit: 0 },
   { name: 'verify-cv-facts.mjs --self-test', expectExit: 0 },
   { name: 'verify-cv-structure.mjs --self-test', expectExit: 0 },
@@ -860,6 +924,8 @@ const scripts = [
   { name: 'company-funded.mjs --self-test', expectExit: 0 },
   { name: 'invite-match.mjs --self-test', expectExit: 0 },
   { name: 'tracker-sync-check.mjs --self-test', expectExit: 0 },
+  { name: 'linkedin-join.mjs --self-test', expectExit: 0 },
+  { name: 'validate-profile.mjs --self-test', expectExit: 0 },
   { name: 'updater-migration-tests.mjs', expectExit: 0 },
   { name: 'validate-portals.mjs --file templates/portals.example.yml', expectExit: 0 },
   { name: 'validate-system-paths-coverage.mjs --self-test', expectExit: 0 },
@@ -1728,7 +1794,7 @@ try {
     finalUrl: SHELL,
     frames: [{ url: 'https://ads.example.net/widget', text: 'Sponsored. '.repeat(30), controls: ['Apply now'] }],
   }), SHELL);
-  if (crossOrigin.result === 'expired' && crossOrigin.code === 'insufficient_content') {
+  if (crossOrigin.result === 'uncertain' && crossOrigin.code === 'insufficient_content') {
     pass('a cross-origin frame cannot make an empty shell look active');
   } else {
     fail(`cross-origin frame leaked into the verdict: ${JSON.stringify(crossOrigin)}`);
@@ -2383,6 +2449,9 @@ for (const f of skillEntrypoints) {
   try {
     copyFileSync(join(ROOT, 'validate-system-paths-coverage.mjs'), join(probeDir, 'validate-system-paths-coverage.mjs'));
     copyFileSync(join(ROOT, 'update-system.mjs'), join(probeDir, 'update-system.mjs'));
+    // The manifest too, so the only thing the guard lacks is a git tree.
+    mkdirSync(join(probeDir, 'lib'));
+    copyFileSync(join(ROOT, 'lib', 'update-manifest.mjs'), join(probeDir, 'lib', 'update-manifest.mjs'));
     const probe = spawnSync(process.execPath, [join(probeDir, 'validate-system-paths-coverage.mjs')], {
       cwd: probeDir,
       encoding: 'utf-8',
@@ -2573,50 +2642,60 @@ const leakPatterns = [
 ];
 
 const scanExtensions = ['md', 'yml', 'html', 'mjs', 'sh', 'go', 'json'];
-const allowedFiles = [
-  // English README + localized translations (all legitimately credit Santiago)
-  'README.md', 'README.ar.md', 'README.da.md', 'README.de.md', 'README.es.md', 'README.fr.md', 'README.hi.md',
-  'README.ja.md', 'README.ko-KR.md', 'README.pl.md', 'README.pt-BR.md', 'README.ru.md', 'README.ta.md', 'README.cn.md',
-  'README.ua.md', 'README.zh-TW.md', 'README.tr.md',
+
+// Every exemption is an EXACT repo-relative path. An earlier version tested
+// allowedFiles.some(a => file.includes(a)), a substring match: an entry like
+// 'README.md' or 'package.json' also exempted any nested file that merely
+// shares the name, such as a future fixtures/package.json or
+// snapshots/tests/hired-wall.test.mjs (luochen211, #4144 review). #4131 added
+// a separate exact list for that reason; the two lists are now one, so a new
+// exemption covers exactly the file it names and nothing else.
+const allowedFiles = new Set([
+  // Root READMEs are matched by isRootReadme() below, not listed here.
+  // A nested README is listed explicitly: the scaffolder's own README credits
+  // the project it scaffolds from.
+  'scaffolder/README.md',
   // Standard project files
-  'LICENSE', 'CITATION.cff', 'CONTRIBUTING.md', 'CHANGELOG.md', 'TRADEMARK.md',
-  'package.json', '.github/FUNDING.yml', 'CLAUDE.md', 'AGENTS.md', 'go.mod', 'test-all.mjs',
+  'CONTRIBUTING.md', 'CHANGELOG.md', 'TRADEMARK.md',
+  'package.json', 'scaffolder/package.json', 'AGENTS.md', 'test-all.mjs',
   '.claude-plugin/marketplace.json', '.claude-plugin/plugin.json', '.github/plugin/plugin.json',
+  // The claude-directory manifest credits its developer like the root
+  // .claude-plugin one above.
+  'claude-directory/.claude-plugin/plugin.json',
   // Community / governance files (added in v1.3.0, all legitimately reference the maintainer)
-  'CODE_OF_CONDUCT.md', 'GOVERNANCE.md', 'SECURITY.md', 'SUPPORT.md',
+  'CODE_OF_CONDUCT.md', 'SECURITY.md', 'SUPPORT.md',
   // Manifesto: the author signs it publicly; the ledger carries signers' names by design
   'MANIFESTO.md', 'SIGNATURES.md', '.github/PULL_REQUEST_TEMPLATE/sign-manifesto.md',
   '.github/SECURITY.md',
-  // Dashboard credit string
-  'dashboard/internal/ui/screens/pipeline.go',
-  'dashboard/internal/ui/screens/progress.go',
-];
-
-// Paths added for #4131, checked by EXACT match rather than folded into
-// allowedFiles above. allowedFiles.some(a => file.includes(a)) is a
-// substring test, which every pre-existing entry already relies on (a
-// nested path containing e.g. "README.md" is exempted too) — widening that
-// same list with plain root-relative basenames like 'funding.json' or
-// 'HIRED.md' would also silently exempt an unrelated tracked file that
-// merely shares a basename, such as a future fixtures/funding.json or
-// snapshots/tests/hired-wall.test.mjs (luochen211, #4144 review). These are
-// the ones this PR actually intends to allow, so they get the tighter
-// check instead of loosening the shared one.
-const exactAllowedFiles = new Set([
-  // Exempt only the root Indonesian README, not similarly named files.
-  'README.id.md',
   // GitHub Sponsors funding target + Codex plugin manifest (#4131) — same
   // maintainer-credit shape as the .claude-plugin/.github/plugin ones above.
   'funding.json', '.codex-plugin/plugin.json',
+  // The OpenAI plugin directory listing names its developer, like the
+  // claude-directory manifest above.
+  'openai-directory/plugin.json',
+  // The Antigravity Marketplace manifest credits its author the same way.
+  'antigravity-directory/plugin.json',
   // Hired Wall: celebrates a hire with a link back to the project, and the
   // scripts/tests that build and cover that feature necessarily carry the
   // same URL (#4131).
   'HIRED.md', 'hired-wall-build.mjs', 'tests/hired-wall.test.mjs', 'tests/project-identity.test.mjs',
-  // Dashboard credit string (#4131) — same substring-vs-exact reasoning as
-  // the entries above; the pre-existing pipeline.go/progress.go entries stay
-  // in the broad allowedFiles list above since they predate this PR.
+  // Dashboard credit string
+  'dashboard/internal/ui/screens/pipeline.go',
+  'dashboard/internal/ui/screens/progress.go',
   'dashboard/internal/ui/screens/stats.go',
+  // An employer registry manifest names who granted its license, by design
+  // (signed_by, employers/README.md). This one is the maintainer's own.
+  'employers/contributions/2026-11-08-santifer.json',
+  // The registry README names its licensor and the address an employer writes
+  // to for removal, by design (employers/README.md, License and Removal).
+  'employers/README.md',
 ]);
+
+// The English README and every localized translation at the repo root
+// legitimately credit Santiago. Matched by shape instead of one entry per
+// language, so a new translation needs no edit here. Root only: no '/' in
+// the path. Same filename shape as tests/how-it-works-diagram.test.mjs.
+const isRootReadme = (file) => !file.includes('/') && /^README(\.[\w-]+)?\.md$/.test(file);
 
 // Build pathspec for git grep — only scan tracked files matching these
 // extensions. This is what `grep -rn` was trying to do, but git-aware:
@@ -2666,9 +2745,7 @@ for (const pattern of leakPatterns) {
   if (result) {
     for (const file of result.split('\0')) {
       if (!file) continue;
-      if (allowedFiles.some(a => file.includes(a))) continue;
-      if (exactAllowedFiles.has(file)) continue;
-      if (file.includes('dashboard/go.mod')) continue;
+      if (allowedFiles.has(file) || isRootReadme(file)) continue;
       warn(`Possible personal data in ${file}: "${pattern}"`);
       leakFound = true;
     }
@@ -2970,17 +3047,18 @@ console.log('\n7c. Updater dashboard rebuild');
 const updateSystemScript = readFile('update-system.mjs');
 if (
   /git\('diff',\s*'--name-only',\s*'HEAD',\s*'--',\s*'dashboard'\)/.test(updateSystemScript) &&
-  /path\.startsWith\(['"]dashboard\/['"]\)\s*&&\s*path\.endsWith\(['"]\.go['"]\)/.test(updateSystemScript) &&
-  /go build -o career-dashboard \./.test(updateSystemScript) &&
+  /return dashboardBuildInputsChanged\(changed\.split\('\\n'\)\)/.test(updateSystemScript) &&
+  /execFileSync\('go',\s*\['build',\s*'-o',\s*binary,\s*'\.'\]/.test(updateSystemScript) &&
+  /const binary = dashboardBinaryName\(\);/.test(updateSystemScript) &&
   /cwd:\s*join\(ROOT,\s*['"]dashboard['"]\)/.test(updateSystemScript) &&
   /dashboard binary rebuild skipped/.test(updateSystemScript)
 ) {
-  pass('update-system rebuilds dashboard binary when dashboard Go sources change');
+  pass('update-system rebuilds dashboard binary when dashboard Go sources or go.mod/go.sum change');
 } else {
-  fail('update-system does not rebuild dashboard binary after dashboard Go source updates');
+  fail('update-system does not rebuild dashboard binary after dashboard Go source or dependency updates');
 }
 
-if (updateSystemScript.includes("'CODEX.md'")) {
+if (readFile('lib/update-manifest.mjs').includes("'CODEX.md'")) {
   pass('update-system preserves CODEX.md as a system-layer wrapper');
 } else {
   fail('update-system does not preserve CODEX.md');
@@ -3324,8 +3402,8 @@ for (const header of ['專業摘要', '工作經歷', '學歷', '證照', '技�
   }
 }
 
-// generate-pdf.mjs imports playwright at module scope; degrade to a warning
-// rather than crashing the suite where it is not installed.
+// Importing generate-pdf.mjs does not load Playwright. Keep the warning so a
+// missing sibling module still skips this section instead of crashing it.
 let pdfModule = null;
 try {
   pdfModule = await import(pathToFileURL(join(ROOT, 'generate-pdf.mjs')).href);
@@ -3815,12 +3893,12 @@ try {
 }
 
 if (
-  run(NODE, ['application-answers.mjs', '--report', '--input'], { stdio: ['pipe', 'pipe', 'pipe'] }) === null &&
-  run(NODE, ['application-answers.mjs', '--report', '--input', 'answers.json'], { stdio: ['pipe', 'pipe', 'pipe'] }) === null
+  runRejects(NODE, ['application-answers.mjs', '--report', '--input'], { stderr: 'Missing value for --report' }, { stdio: ['pipe', 'pipe', 'pipe'] }) &&
+  runRejects(NODE, ['application-answers.mjs', '--report', '--input', 'answers.json'], { stderr: 'Missing value for --report' }, { stdio: ['pipe', 'pipe', 'pipe'] })
 ) {
   pass('application-answers CLI rejects missing option values');
 } else {
-  fail('application-answers CLI accepted a missing option value');
+  fail(`application-answers CLI did not reject a missing option value as intended${formatRunFailure()}`);
 }
 
 const ofertaMode = readOfertaMode();
@@ -4669,13 +4747,13 @@ for (const mode of ['discover', 'text']) {
 
 const dataContractDoc = readFile('DATA_CONTRACT.md');
 const gitignoreDoc = readFile('.gitignore');
-const updaterSrc = readFile('update-system.mjs');
+const updateManifestSrc = readFile('lib/update-manifest.mjs');
 if (
   dataContractDoc.includes('data/offers/') &&
   dataContractDoc.includes('modes/offer-prep.md') &&
   gitignoreDoc.includes('data/offers/*') &&
   gitignoreDoc.includes('!data/offers/.gitkeep') &&
-  updaterSrc.includes("'modes/offer-prep.md'")
+  updateManifestSrc.includes("'modes/offer-prep.md'")
 ) {
   pass('offer-prep registered in data contract, gitignore, and updater manifest');
 } else {
@@ -4855,7 +4933,7 @@ if (!existsSync(openrouterRunnerPath)) {
   const openrouterRunner = readFile('openrouter-runner.mjs');
   if (
     openrouterRunner.includes('// Job page content fetcher (Playwright-first, plain fetch fallback)') &&
-    openrouterRunner.includes('browser = await chromium.launch({ headless: true })') &&
+    /browser\s*=\s*await\s+chromium\.launch\(browserLaunchOptions\(\s*\{\s*headless:\s*true\s*\},\s*\{\s*projectRoot:\s*DATA_ROOT,\s*processEnv:\s*BROWSER_PROCESS_ENV\s*\},\s*\)\)/.test(openrouterRunner) &&
     openrouterRunner.includes('falling back to plain fetch.') &&
     openrouterRunner.includes('if (browser) await browser.close().catch(() => {})')
   ) {
@@ -5880,21 +5958,21 @@ try {
   }
 
   // ── 2. a16z HTML parsing ───────────────────────────────────────────
-  // Sample HTML fixture with data-company-name attributes (the most reliable strategy).
-  const a16zHtml = `
-    <div class="portfolio-grid">
-      <a href="https://github.com" data-company-name="GitHub" data-company-url="https://github.com" class="portfolio-card"></a>
-      <a href="https://lyft.com" data-company-name="Lyft" data-company-url="https://lyft.com" class="portfolio-card"></a>
-      <a href="https://slack.com" data-company-name="Slack" data-company-url="https://slack.com" class="portfolio-card"></a>
-    </div>
-  `;
+  // The live page embeds its list as HTML-escaped JSON in a data-companies
+  // attribute (tests/vc-portfolios-a16z.test.mjs covers the real markup).
+  const a16zList = [
+    { id: '1', name: 'GitHub', company_url: 'https://github.com', acquirer: '' },
+    { id: '2', name: 'Lyft', company_url: 'https://lyft.com', acquirer: '' },
+    { id: '3', name: 'Slack', company_url: 'https://slack.com', acquirer: '' },
+  ];
+  const a16zHtml = `<div x-data="wr25Portfolio()" data-companies="${JSON.stringify(a16zList).replace(/"/g, '&quot;')}"></div>`;
   const a16zEntries = parseA16zPayload(a16zHtml);
   const a16zOk =
     a16zEntries.length === 3 &&
     a16zEntries.some(e => e.name === 'GitHub' && e.source === 'a16z' && e.url === 'https://github.com') &&
     a16zEntries.some(e => e.name === 'Lyft' && e.source === 'a16z') &&
     a16zEntries.some(e => e.name === 'Slack' && e.source === 'a16z');
-  if (a16zOk) pass('parseA16zPayload: extracts companies from data-company-name HTML attributes');
+  if (a16zOk) pass('parseA16zPayload: extracts companies from the data-companies attribute');
   else fail(`parseA16zPayload: output wrong — got ${a16zEntries.length} entries: ${JSON.stringify(a16zEntries.map(e => e.name))}`);
 
   // parseSeedEntries() delegating to a16z.
@@ -5940,9 +6018,9 @@ try {
   // ── 5. toPortalEntry — no ATS hint, slug-based fallback ───────────
   const noHint = toPortalEntry({ name: 'NewCo', slug: 'newco', url: 'https://newco.io', source: 'yc' });
   const noHintOk =
-    noHint.careers_url === 'https://job-boards.greenhouse.io/newco' && // Greenhouse is the default probe
+    noHint.careers_url === 'https://jobs.ashbyhq.com/newco' && // first of the Ashby, Greenhouse, Lever slug probes
     noHint.name === 'NewCo';
-  if (noHintOk) pass('toPortalEntry: no ATS hint falls back to Greenhouse URL from slug (provider.detect() validates at scan time)');
+  if (noHintOk) pass('toPortalEntry: no ATS hint → first slug probe (Ashby); the scan also tries Greenhouse and Lever');
   else fail(`toPortalEntry fallback wrong — got: ${noHint.careers_url}`);
 
   // ── 5b. toPortalEntry — website fallback when slug is empty ───────
@@ -7697,9 +7775,9 @@ run(NODE, ['archive-posting.mjs']) !== null
 // argument validation: a trailing --report must not be dropped. It used to fall
 // through the parser and archive the posting with no report prefix — silently
 // unfindable, the exact failure --report exists to prevent.
-run(NODE, ['archive-posting.mjs', '--dry-run', 'https://boards.greenhouse.io/openai/jobs/123', '--report']) === null
+runRejects(NODE, ['archive-posting.mjs', '--dry-run', 'https://boards.greenhouse.io/openai/jobs/123', '--report'], { stderr: '--report requires a value' })
   ? pass('trailing --report: exits non-zero instead of archiving unkeyed')
-  : fail('trailing --report: should exit non-zero, not archive without a report prefix');
+  : fail(`trailing --report: should exit 1 with "--report requires a value", not archive without a report prefix${formatRunFailure()}`);
 
 // argument validation: both --report forms still key the capture
 for (const argv of [['--report', '4'], ['--report=4']]) {
@@ -7710,14 +7788,14 @@ for (const argv of [['--report', '4'], ['--report=4']]) {
 }
 
 // argument validation: flag without URL → exits non-zero
-run(NODE, ['archive-posting.mjs', '--dry-run']) === null
+runRejects(NODE, ['archive-posting.mjs', '--dry-run'], { stderr: 'No URL provided.' })
   ? pass('flag-without-url: exits non-zero (URL required)')
-  : fail('flag-without-url: should exit non-zero when URL is missing');
+  : fail(`flag-without-url: should exit 1 with "No URL provided." when URL is missing${formatRunFailure()}`);
 
 // argument validation: --company without URL → exits non-zero
-run(NODE, ['archive-posting.mjs', '--company=Acme']) === null
+runRejects(NODE, ['archive-posting.mjs', '--company=Acme'], { stderr: 'No URL provided.' })
   ? pass('--company without URL: exits non-zero')
-  : fail('--company without URL: should exit non-zero');
+  : fail(`--company without URL: should exit 1 with "No URL provided."${formatRunFailure()}`);
 
 // --report: keys the capture to a report number so it resolves on a later day (#134)
 const reportEqOut = run(NODE, ['archive-posting.mjs', '--dry-run', '--report=42', 'https://boards.greenhouse.io/openai/jobs/123']);
@@ -7739,13 +7817,13 @@ noReportDays.some((day) => noReportOut?.includes(`jds/${day}_`))
   ? pass('no --report: filename shape unchanged')
   : fail('no --report: filename shape regressed');
 
-run(NODE, ['archive-posting.mjs', '--dry-run', '--report=abc', 'https://boards.greenhouse.io/openai/jobs/123']) === null
+runRejects(NODE, ['archive-posting.mjs', '--dry-run', '--report=abc', 'https://boards.greenhouse.io/openai/jobs/123'], { stderr: 'Invalid --report value: "abc"' })
   ? pass('--report with non-numeric value: exits non-zero')
-  : fail('--report with non-numeric value: should be rejected, not ignored');
+  : fail(`--report with non-numeric value: should be rejected, not ignored${formatRunFailure()}`);
 
-run(NODE, ['archive-posting.mjs', '--pipeline', '--report=42']) === null
+runRejects(NODE, ['archive-posting.mjs', '--pipeline', '--report=42'], { stderr: 'cannot be combined with --pipeline' })
   ? pass('--report with --pipeline: rejected (report keys one posting)')
-  : fail('--report with --pipeline: should exit non-zero');
+  : fail(`--report with --pipeline: should exit 1 with the --pipeline conflict message${formatRunFailure()}`);
 
 // live render: gated behind Playwright executable availability
 let hasBrowser = false;
@@ -12284,7 +12362,7 @@ try {
     writeFileSync(join(additionsDir, '005-streamco.tsv'),
       '5\t2026-01-06\tStreamCo\tFull Stack Engineer 5, Ads Reporting\tEvaluated\t4.5/5\t❌\t[5](reports/005-streamco-2026-01-06.md)\trepost\n');
 
-    const mergeResult = run(NODE, ['merge-tracker.mjs'], { env: { ...process.env, CAREER_OPS_TRACKER: tracker, CAREER_OPS_ADDITIONS: additionsDir } });
+    const mergeResult = run(NODE, ['merge-tracker.mjs', '--allow-headerless'], { env: { ...process.env, CAREER_OPS_TRACKER: tracker, CAREER_OPS_ADDITIONS: additionsDir } });
     if (mergeResult === null) {
       fail('merge-tracker.mjs crashed during fuzzy dedup regression test');
     } else {
@@ -12349,7 +12427,7 @@ try {
       '3\t2026-01-05\tAcme\tData Engineer\tEvaluated\t4.6/5\t❌\t[3](reports/003-acme-2026-01-05.md)\tnew eval\n');
 
     const widthEnv = { ...process.env, CAREER_OPS_TRACKER: tracker, CAREER_OPS_ADDITIONS: additionsDir };
-    const widthResult = run(NODE, ['merge-tracker.mjs'], { env: widthEnv });
+    const widthResult = run(NODE, ['merge-tracker.mjs', '--allow-headerless'], { env: widthEnv });
     if (widthResult === null) {
       fail('merge-tracker.mjs crashed on a 10-column custom-header tracker');
     } else {
@@ -12390,7 +12468,7 @@ try {
       // not append a duplicate.
       writeFileSync(join(additionsDir, '003-acme-reeval.tsv'),
         '3\t2026-01-06\tAcme\tData Engineer\tEvaluated\t4.8/5\t❌\t[3](reports/003-acme-2026-01-05.md)\tre-eval\n');
-      const rerun = run(NODE, ['merge-tracker.mjs'], { env: widthEnv });
+      const rerun = run(NODE, ['merge-tracker.mjs', '--allow-headerless'], { env: widthEnv });
       if (rerun === null) {
         fail('merge-tracker.mjs crashed on re-evaluation against a Notes-embedded report link');
       } else {
@@ -12409,7 +12487,7 @@ try {
       // wipe both on every update.
       writeFileSync(join(additionsDir, '004-streamco.tsv'),
         '4\t2026-01-07\tStreamCo\tPlatform Engineer\tEvaluated\t4.7/5\t❌\t[4](reports/004-acme-2026-01-06.md)\tre-eval of seeded row\n');
-      const preserveRun = run(NODE, ['merge-tracker.mjs'], { env: widthEnv });
+      const preserveRun = run(NODE, ['merge-tracker.mjs', '--allow-headerless'], { env: widthEnv });
       if (preserveRun === null) {
         fail('merge-tracker.mjs crashed while updating a row with populated custom columns');
       } else {
@@ -12465,7 +12543,7 @@ try {
     writeFileSync(join(additionsDir, '004-acme.tsv'),
       '4\t2026-01-09\tAcme\tSr Platform Engineer, Observability (Remote)\tEvaluated\t4.2/5\t❌\t[4](reports/004-acme-2026-01-09.md)\trepost re-eval\n');
 
-    const clobberResult = run(NODE, ['merge-tracker.mjs'], { env: { ...process.env, CAREER_OPS_TRACKER: tracker, CAREER_OPS_ADDITIONS: additionsDir } });
+    const clobberResult = run(NODE, ['merge-tracker.mjs', '--allow-headerless'], { env: { ...process.env, CAREER_OPS_TRACKER: tracker, CAREER_OPS_ADDITIONS: additionsDir } });
     if (clobberResult === null) {
       fail('merge-tracker.mjs crashed during sibling-req clobber guard test');
     } else {
@@ -12550,7 +12628,7 @@ try {
       fail('tier-2 fixture roles now fuzzy-match — this test no longer isolates tier-2');
     }
 
-    const tier2Result = run(NODE, ['merge-tracker.mjs'], { env: { ...process.env, CAREER_OPS_TRACKER: tracker, CAREER_OPS_ADDITIONS: additionsDir } });
+    const tier2Result = run(NODE, ['merge-tracker.mjs', '--allow-headerless'], { env: { ...process.env, CAREER_OPS_TRACKER: tracker, CAREER_OPS_ADDITIONS: additionsDir } });
     if (tier2Result === null) {
       fail('merge-tracker.mjs crashed during tier-2 title preservation test');
     } else {
@@ -12613,7 +12691,7 @@ try {
     writeFileSync(join(additionsDir, '003-unknown.tsv'),
       '3\t2026-01-06\t?\tBackend Engineer, Payments Platform\tEvaluated\t4.2/5\t❌\t[3](reports/003-unknown-2026-01-06.md)\tre-blast\tvia=リクルート\n');
 
-    const viaResult = run(NODE, ['merge-tracker.mjs'], { env: { ...process.env, CAREER_OPS_TRACKER: tracker, CAREER_OPS_ADDITIONS: additionsDir } });
+    const viaResult = run(NODE, ['merge-tracker.mjs', '--allow-headerless'], { env: { ...process.env, CAREER_OPS_TRACKER: tracker, CAREER_OPS_ADDITIONS: additionsDir } });
     if (viaResult === null) {
       fail('merge-tracker.mjs crashed during non-Latin via guard test (#1603)');
     } else {
@@ -12878,7 +12956,7 @@ try {
     writeFileSync(join(additionsDir, '002-globex.tsv'),
       '2\t2026-01-05\tグロベックス合同会社\tBackend Engineer, Payments Platform\tEvaluated\t4.1/5\t❌\t[2](reports/002-globex-2026-01-05.md)\tsecond company\n');
 
-    const coResult = run(NODE, ['merge-tracker.mjs'], { env: { ...process.env, CAREER_OPS_TRACKER: tracker, CAREER_OPS_ADDITIONS: additionsDir } });
+    const coResult = run(NODE, ['merge-tracker.mjs', '--allow-headerless'], { env: { ...process.env, CAREER_OPS_TRACKER: tracker, CAREER_OPS_ADDITIONS: additionsDir } });
     if (coResult === null) {
       fail('merge-tracker.mjs crashed during non-Latin company test (#2429)');
     } else {
@@ -12987,7 +13065,7 @@ try {
     writeFileSync(join(additionsDir, '004-boldco.tsv'),
       '4\t2026-01-05\tBoldCo\tSRE\tEvaluated\t**4.7/5**\t❌\t[4](reports/004-boldco-2026-01-05.md)\tbold score\n');
 
-    const mergeResult = run(NODE, ['merge-tracker.mjs'], { env: { ...process.env, CAREER_OPS_TRACKER: tracker, CAREER_OPS_ADDITIONS: additionsDir } });
+    const mergeResult = run(NODE, ['merge-tracker.mjs', '--allow-headerless'], { env: { ...process.env, CAREER_OPS_TRACKER: tracker, CAREER_OPS_ADDITIONS: additionsDir } });
     if (mergeResult === null) {
       fail('merge-tracker.mjs crashed during column-order test');
     } else {
@@ -13051,7 +13129,7 @@ try {
     }
 
     try {
-    const result = run(NODE, ['merge-tracker.mjs'], {
+    const result = run(NODE, ['merge-tracker.mjs', '--allow-headerless'], {
       env: { ...process.env, CAREER_OPS_TRACKER: tracker, CAREER_OPS_ADDITIONS: additionsDir },
     });
     const merged = readFileSync(tracker, 'utf-8');
@@ -13199,7 +13277,7 @@ try {
     writeFileSync(join(col912Additions, '001-newco.tsv'),
       '1\t2026-01-05\tNewCo\tNew Role\tEvaluated\t2.7/5\t❌\t[1](reports/001-newco-2026-01-05.md)\tcollision\n');
 
-    const col912Result = run(NODE, ['merge-tracker.mjs'], {
+    const col912Result = run(NODE, ['merge-tracker.mjs', '--allow-headerless'], {
       env: { ...process.env, CAREER_OPS_TRACKER: col912Tracker, CAREER_OPS_ADDITIONS: col912Additions },
     });
     if (col912Result === null) {
@@ -13271,7 +13349,7 @@ try {
     writeFileSync(join(staleNumAdditions, '001-newco.tsv'),
       '9\t2026-01-10\tNewCo\tFresh Role\tEvaluated\t2.9/5\t❌\t—\tstale number\n');
 
-    const staleNumResult = run(NODE, ['merge-tracker.mjs'], {
+    const staleNumResult = run(NODE, ['merge-tracker.mjs', '--allow-headerless'], {
       env: { ...process.env, CAREER_OPS_TRACKER: staleNumTracker, CAREER_OPS_ADDITIONS: staleNumAdditions },
     });
     if (staleNumResult === null) {
@@ -13333,7 +13411,7 @@ try {
 
     writeFileSync(join(reservedAdditions, '005-early.tsv'),
       '5\t2026-01-05\tEarlyCo\tEngineer\tEvaluated\t4.1/5\t❌\t[5](reports/005-early-2026-01-05.md)\treserved first\n');
-    const preserveResult = run(NODE, ['merge-tracker.mjs'], {
+    const preserveResult = run(NODE, ['merge-tracker.mjs', '--allow-headerless'], {
       env: { ...process.env, CAREER_OPS_TRACKER: reservedTracker, CAREER_OPS_ADDITIONS: reservedAdditions },
     });
     const afterPreserve = readFileSync(reservedTracker, 'utf-8');
@@ -13345,7 +13423,7 @@ try {
 
     writeFileSync(join(reservedAdditions, '005-collision.tsv'),
       '5\t2026-01-11\tCollisionCo\tAnalyst\tEvaluated\t3.8/5\t❌\t—\tstale reservation\n');
-    const collisionResult = spawnSync(NODE, [join(ROOT, 'merge-tracker.mjs')], {
+    const collisionResult = spawnSync(NODE, [join(ROOT, 'merge-tracker.mjs'), '--allow-headerless'], {
       cwd: ROOT,
       encoding: 'utf-8',
       env: { ...process.env, CAREER_OPS_TRACKER: reservedTracker, CAREER_OPS_ADDITIONS: reservedAdditions },
@@ -13416,7 +13494,7 @@ try {
       '1\t2026-01-06\tEmpresa Ejemplo\tData Lead\tEvaluated\t4.1/5\t❌\t' +
       '[1](reports/001-empresa-ejemplo-2026-01-05.md)\tre-evaluated after JD update\n');
 
-    const hOut = run(NODE, ['merge-tracker.mjs'], {
+    const hOut = run(NODE, ['merge-tracker.mjs', '--allow-headerless'], {
       env: { ...process.env, CAREER_OPS_TRACKER: hTracker, CAREER_OPS_ADDITIONS: hAdditions },
     });
 
@@ -13600,7 +13678,7 @@ try {
     writeFileSync(join(reqAdditions, '007-northwind.tsv'),
       '7\t2026-01-02\tNorthwind\tOperations Analyst\tEvaluated\t3.2/5\t❌\t[7](reports/007-northwind-2026-01-02.md)\tno req number on this side\n');
 
-    const reqResult = run(NODE, ['merge-tracker.mjs'], { env: { ...process.env, CAREER_OPS_TRACKER: reqTracker, CAREER_OPS_ADDITIONS: reqAdditions } });
+    const reqResult = run(NODE, ['merge-tracker.mjs', '--allow-headerless'], { env: { ...process.env, CAREER_OPS_TRACKER: reqTracker, CAREER_OPS_ADDITIONS: reqAdditions } });
     if (reqResult === null) {
       fail('merge-tracker.mjs crashed during req/job-number dedup guard test (#1524)');
     } else {
@@ -13684,7 +13762,7 @@ try {
       let readyMarked = false;
       const ready = new Promise(resolve => { markReady = resolve; });
       const result = new Promise(resolve => {
-        const child = spawn(NODE, ['merge-tracker.mjs'], {
+        const child = spawn(NODE, ['merge-tracker.mjs', '--allow-headerless'], {
           cwd: ROOT,
           env: {
             ...process.env,
@@ -13894,6 +13972,7 @@ if (!sqliteAvailable) {
       const md = join(idxTmp, 'applications.md');
       const env = { ...process.env, CAREER_OPS_TRACKER: md };
       const trackerRun = (args) => run(NODE, ['tracker.mjs', ...args], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+      const trackerRejects = (args, stderr) => runRejects(NODE, ['tracker.mjs', ...args], { stderr }, { env, stdio: ['pipe', 'pipe', 'pipe'] });
 
       // 1. Round trip: clean canonical input must export byte-identical.
       const clean =
@@ -13923,10 +14002,10 @@ if (!sqliteAvailable) {
       const corrupted = clean +
         '| 1 | 2026-01-06 | Gamma | PM | — | 3.5/5 | ❌ | 鈥? | drifted |\n'; // dup id + score in status + mojibake
       writeFileSync(md, corrupted);
-      if (trackerRun(['sync', '--check']) === null) {
+      if (trackerRejects(['sync', '--check'], 'Corruption detected in')) {
         pass('sync --check exits non-zero when corruption is present');
       } else {
-        fail('sync --check did not flag corrupted fixture');
+        fail(`sync --check did not flag corrupted fixture${formatRunFailure()}`);
       }
       const queried = JSON.parse(trackerRun(['query', '--company', 'Gamma', '--json']) || '[]');
       if (queried.length === 1 && queried[0].status === 'Evaluated' && queried[0].score === '3.5/5' && queried[0].id === 3) {
@@ -13946,10 +14025,10 @@ if (!sqliteAvailable) {
       const malformedId = clean +
         '| 9junk | 2026-01-06 | Prefix Co | PM | 3.5/5 | Applied | ❌ | — | malformed id |\n';
       writeFileSync(md, malformedId);
-      if (trackerRun(['sync', '--check']) === null) {
+      if (trackerRejects(['sync', '--check'], 'missing/malformed/duplicate id(s)')) {
         pass('sync --check rejects an application ID with a numeric prefix');
       } else {
-        fail('sync --check accepted a numeric-prefix application ID');
+        fail(`sync --check accepted a numeric-prefix application ID${formatRunFailure()}`);
       }
       const repairedId = JSON.parse(trackerRun(['query', '--company', 'Prefix Co', '--json']) || '[]');
       if (repairedId.length === 1 && repairedId[0].id === 3) {
@@ -13957,10 +14036,13 @@ if (!sqliteAvailable) {
       } else {
         fail(`malformed application ID was not safely reassigned: ${JSON.stringify(repairedId)}`);
       }
-      if (trackerRun(['query', '--id', '1junk', '--json']) === null && trackerRun(['history', '--id', '1junk']) === null) {
+      if (
+        trackerRejects(['query', '--id', '1junk', '--json'], '--id must be a positive integer') &&
+        trackerRejects(['history', '--id', '1junk'], 'history requires --id N (a positive integer)')
+      ) {
         pass('query/history reject numeric-prefix --id values');
       } else {
-        fail('query/history accepted a numeric-prefix --id value');
+        fail(`query/history accepted a numeric-prefix --id value${formatRunFailure()}`);
       }
 
       // 3. Staleness: query after an md edit must auto-resync (no stale reads).
@@ -14014,8 +14096,17 @@ try {
   // have enabled; without it "no MCP config" is false on a real machine and the
   // warning assertion below fails. Same reasoning as the GIT_CONFIG_* pinning
   // in section 12c.
+  //
+  // PATH is pinned for the same reason. With no --cli and no CAREER_OPS_CLI,
+  // doctor treats one other installed CLI as the active one, and several as
+  // unset. Either way the "no MCP config" warning this block asserts never
+  // mentions Playwright, so a developer machine would decide the result. An
+  // empty directory keeps every agent CLI out, including one a system image
+  // might ship under a short name. Node is started by its absolute path, and
+  // the git check skips itself when git cannot be run.
   const emptyClaudeCfg = mkdtempSync(join(tmpdir(), 'co-emptycfg-'));
-  const doctorEnv = { env: { ...process.env, CLAUDE_CONFIG_DIR: emptyClaudeCfg } };
+  const emptyDoctorPath = mkdtempSync(join(tmpdir(), 'co-empty-path-'));
+  const doctorEnv = { env: { ...process.env, CLAUDE_CONFIG_DIR: emptyClaudeCfg, PATH: emptyDoctorPath } };
 
   // No project MCP config → doctor surfaces a (non-fatal) warning instead of
   // letting SPA job boards fail silently. doctor reads project MCP config from
@@ -14068,6 +14159,7 @@ try {
   }
   rmSync(withLocalMcp, { recursive: true, force: true });
   rmSync(emptyClaudeCfg, { recursive: true, force: true });
+  rmSync(emptyDoctorPath, { recursive: true, force: true });
 } catch (e) {
   fail(`Playwright MCP detection test crashed: ${e.message}`);
 }
@@ -14572,6 +14664,22 @@ try {
       pass('log_discard appends a one-line, auditable {timestamp, id, url, reason} record to batch/logs/discard.log');
     } else {
       fail(`log_discard output malformed: ${JSON.stringify(out)}`);
+    }
+
+    // The helper test above passes even when nothing calls the helper (#6440).
+    // Every filter discard (a literal "skipped" state write) must also log it.
+    const lines = runnerSrc.split('\n');
+    const skipWrites = lines
+      .map((l, i) => ({ l, i }))
+      .filter(({ l }) => /^\s*update_state_retrying\b.*"skipped"/.test(l));
+    const unlogged = skipWrites.filter(({ i }) =>
+      !lines.slice(i + 1, i + 4).some((l) => /^\s*log_discard\s/.test(l)));
+    if (skipWrites.length === 0) {
+      fail('batch-runner.sh has no "skipped" state write to check for a log_discard call');
+    } else if (unlogged.length) {
+      fail(`batch-runner.sh writes a "skipped" state without calling log_discard at line(s) ${unlogged.map(({ i }) => i + 1).join(', ')}`);
+    } else {
+      pass(`every "skipped" state write in batch-runner.sh calls log_discard (${skipWrites.length} call sites)`);
     }
   }
 
@@ -15377,7 +15485,7 @@ try {
   }
 
   // The template MUST be in SYSTEM_PATHS so updates deliver/refresh it.
-  const sysBlock = (updater.match(/SYSTEM_PATHS\s*=\s*\[([\s\S]*?)\]/) || [, ''])[1];
+  const sysBlock = (readFileSync(join(ROOT, 'lib', 'update-manifest.mjs'), 'utf-8').match(/SYSTEM_PATHS\s*=\s*\[([\s\S]*?)\]/) || [, ''])[1];
   if (sysBlock.includes("'modes/_custom.template.md'")) {
     pass('modes/_custom.template.md is in SYSTEM_PATHS (shipped + updatable)');
   } else {
@@ -15497,12 +15605,16 @@ try {
 // contents. Source-level, since gemini-eval runs on import.
 console.log('\n44d. gemini-eval — static prefix as systemInstruction (#1709)');
 try {
-  const src = readFileSync(join(ROOT, 'gemini-eval.mjs'), 'utf-8');
+  const rawSrc = readFileSync(join(ROOT, 'gemini-eval.mjs'), 'utf-8');
+  const src = stripCommentLines(rawSrc);
   const usesSystemInstruction = /getGenerativeModel\(\{[\s\S]*?systemInstruction:\s*systemPrompt/.test(src);
   // the per-request call must NOT re-embed the full systemPrompt inline (that
   // would defeat stable-prefix caching and duplicate the context)
   const noInlinePrefix = !/generateContent\(\[[\s\S]*?\{\s*text:\s*systemPrompt\s*\}/.test(src);
-  const carriesJdTurn = /generateContent\(`JOB DESCRIPTION TO EVALUATE/.test(src);
+  // inline template, or a named turn (#5571 hands the same turn to the PII guard first in the same block)
+  const carriesJdTurn =
+    /generateContent\(`JOB DESCRIPTION TO EVALUATE/.test(src) ||
+    /(?:const|let|var)\s+(\w+)\s*=\s*`JOB DESCRIPTION TO EVALUATE[^`]*`[^{}]*?assertGoogleRequestAllowed\(\s*\{[^{}]*?\bturns:\s*\[\s*\1\s*\][^{}]*?\}\s*\);?[^{}]*?await\s+(?:\w+\.)?generateContent\(\s*\1\s*\)/.test(src);
   if (usesSystemInstruction && noInlinePrefix && carriesJdTurn) {
     pass('gemini-eval moves the static prefix to systemInstruction and sends only the JD turn (#1709)');
   } else {
@@ -16400,8 +16512,9 @@ try {
 
   // Updater registration (SYSTEM vs USER split).
   const upd = readFileSync(join(ROOT, 'update-system.mjs'), 'utf8');
-  if (["'plugins/'", "'plugins.mjs'", "'config/plugins.example.yml'"].every(s => upd.includes(s))) pass('plugins/, plugins.mjs, config/plugins.example.yml registered as SYSTEM paths');
-  else fail('plugin SYSTEM paths not fully registered in update-system.mjs');
+  const manifest = readFileSync(join(ROOT, 'lib', 'update-manifest.mjs'), 'utf8');
+  if (["'plugins/'", "'plugins.mjs'", "'config/plugins.example.yml'"].every(s => manifest.includes(s))) pass('plugins/, plugins.mjs, config/plugins.example.yml registered as SYSTEM paths');
+  else fail('plugin SYSTEM paths not fully registered in lib/update-manifest.mjs');
   if (["'config/plugins.yml'", "'plugins.local/'"].every(s => upd.includes(s))) pass('config/plugins.yml + plugins.local/ registered as USER paths (never auto-updated)');
   else fail('plugin USER paths not registered in update-system.mjs');
 
@@ -16450,8 +16563,8 @@ for (const f of ['interview-prep/sessions/.gitkeep', 'interview-prep/sessions/RE
 
 // The scaffold must be in SYSTEM_PATHS (the updater delivers/refreshes it).
 {
-  const updater = readFile('update-system.mjs');
-  const sysBlock = (updater.match(/SYSTEM_PATHS\s*=\s*\[([\s\S]*?)\]/) || [, ''])[1];
+  const manifest = readFile('lib/update-manifest.mjs');
+  const sysBlock = (manifest.match(/SYSTEM_PATHS\s*=\s*\[([\s\S]*?)\]/) || [, ''])[1];
   for (const p of ['interview-prep/sessions/.gitkeep', 'interview-prep/sessions/README.md']) {
     if (sysBlock.includes(`'${p}'`)) {
       pass(`Session scaffold in SYSTEM_PATHS: ${p}`);
@@ -16816,7 +16929,12 @@ try {
     ["merge-tracker.mjs writes the cell through formatUrlCell", /put\('url', formatUrlCell\(/.test(mergeSrc)],
     ["merge-tracker.mjs reads the href before keying", /url: COLMAP\.url != null \? extractCellUrl\(/.test(mergeSrc)],
     ["tracker-parse.mjs returns the href on parsed rows", /url: extractCellUrl\(at\('url'\)\)/.test(parseSrc)],
-    ["the Go dashboard extracts the href", /func extractCellURL\(/.test(goCareerSrc) && /JobURL:\s+extractCellURL\(at\("url"\)\)/.test(goCareerSrc)],
+    // JobURL goes through trackerPostingURL, which reads the cell with
+    // extractCellURL and then drops a "—"/"N/A"/local:jds/ value that names no
+    // posting: kept, it switched off every JobURL enrichment tier.
+    ["the Go dashboard extracts the href", /func extractCellURL\(/.test(goCareerSrc)
+      && /JobURL:\s+trackerPostingURL\(at\("url"\)\)/.test(goCareerSrc)
+      && /func trackerPostingURL\(cell string\) string \{\s*value := extractCellURL\(cell\)/.test(goCareerSrc)],
     // history-ats-seeds reads the cell directly rather than through
     // parseTrackerRow, so it is listed on its own.
     ["history-ats-seeds.mjs extracts the href", /extractCellUrl\(cells\[columns\.url\]\)/.test(historySeedsSrc)],
@@ -16978,7 +17096,7 @@ try {
     // The assistant preamble also enumerates the states in PROSE (the setStatus
     // list + the filterPipeline tab enum). Those drift the same way — the AI
     // couldn't offer to set/filter by Hired — so check them too (#2249).
-    const assistantPath = join(ROOT, 'web', 'src', 'app', 'api', 'assistant', 'route.ts');
+    const assistantPath = join(ROOT, 'web', 'src', 'lib', 'assistant-preamble.mjs');
     if (existsSync(assistantPath)) {
       const src = readFileSync(assistantPath, 'utf-8');
       const proseChecks = [
@@ -18261,10 +18379,10 @@ try {
     fail('AGENTS.md missing the titles Skill Modes row');
   }
 
-  const updaterSrc = readFile('update-system.mjs');
-  const titlesSysBlock = (updaterSrc.match(/SYSTEM_PATHS\s*=\s*\[([\s\S]*?)\]/) || [, ''])[1];
+  const manifestSrc = readFile('lib/update-manifest.mjs');
+  const titlesSysBlock = (manifestSrc.match(/SYSTEM_PATHS\s*=\s*\[([\s\S]*?)\]/) || [, ''])[1];
   if (titlesSysBlock.includes("'modes/titles.md'")) {
-    pass('modes/titles.md is in update-system.mjs SYSTEM_PATHS (shipped + updatable)');
+    pass('modes/titles.md is in SYSTEM_PATHS (shipped + updatable)');
   } else {
     fail('modes/titles.md is NOT in SYSTEM_PATHS — updates would never deliver it');
   }
@@ -18994,12 +19112,11 @@ console.log('\n67. Protected-grounds question detection (#2030)');
         pgRaw.includes('CONTRIBUTION RULE') &&
         pgRaw.includes('NOT LEGAL ADVICE') &&
         pgRaw.includes('EEOC') &&
-        pgRaw.includes('Equality Act') &&
-        pgRaw.includes('AGG')
+        pgRaw.includes('Equality Act')
       ) {
-        pass('protected-grounds.yml header documents the contribution rule + not-legal-advice register and lists candidate rows (EEOC, UK Equality Act, DE AGG) as comments only (#2030)');
+        pass('protected-grounds.yml header documents the contribution rule + not-legal-advice register and lists candidate rows (EEOC, UK Equality Act) as comments only (#2030)');
       } else {
-        fail('protected-grounds.yml header missing the contribution rule, not-legal-advice note, and/or the commented candidate rows (EEOC / Equality Act / AGG) (#2030)');
+        fail('protected-grounds.yml header missing the contribution rule, not-legal-advice note, and/or the commented candidate rows (EEOC / Equality Act) (#2030)');
       }
     } catch (e) {
       fail(`templates/protected-grounds.yml does not parse as YAML: ${e.message} (#2030)`);
@@ -19286,10 +19403,10 @@ console.log('\n70. Table-freshness validator wiring + read-only boundary (#2036)
 try {
   const freshnessSrc = readFile('check-table-freshness.mjs');
 
-  const updaterSrc = readFile('update-system.mjs');
-  const freshSysBlock = (updaterSrc.match(/SYSTEM_PATHS\s*=\s*\[([\s\S]*?)\]/) || [, ''])[1];
+  const manifestSrc = readFile('lib/update-manifest.mjs');
+  const freshSysBlock = (manifestSrc.match(/SYSTEM_PATHS\s*=\s*\[([\s\S]*?)\]/) || [, ''])[1];
   if (freshSysBlock.includes("'check-table-freshness.mjs'")) {
-    pass('check-table-freshness.mjs is in update-system.mjs SYSTEM_PATHS (shipped + updatable)');
+    pass('check-table-freshness.mjs is in SYSTEM_PATHS (shipped + updatable)');
   } else {
     fail('check-table-freshness.mjs is NOT in SYSTEM_PATHS — updates would never deliver it');
   }

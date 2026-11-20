@@ -15,7 +15,9 @@ import { nextScheduledRun } from "../src/lib/scheduled-cadence.mjs";
 import { isMainModule } from "../../lib/is-main-module.mjs";
 import { scheduledRunnerResourcePath, scheduledStorePath } from "../src/lib/scheduled-runner-path.mjs";
 import { getCareerOpsRoot } from "../../path-resolver.mjs";
+import { pollLinkedInInbox } from "../../lib/linkedin-auto.mjs";
 import { getProfilePath } from "../src/lib/core/profile-path.mjs";
+import { scanFailureMessage } from "../src/lib/scheduled-scan-error.mjs";
 
 const CODE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 export const MAX_RUNS = 100;
@@ -178,21 +180,18 @@ function writeJobPortals(root, job) {
   return tempPath;
 }
 
-function firstErrorLine(result) {
-  const raw = result.stderr || result.error?.message || `scanner exit ${result.status ?? "unknown"}`;
-  return String(raw).split(/\r?\n/).find(Boolean)?.slice(0, 300) || "Scan failed";
-}
-
 /*
  * Keep the temporary portal overlay scoped to each retry. A thrown setup or
  * spawn error is retryable just like a non-zero scanner exit, while cleanup
- * still runs before the next attempt.
+ * still runs before the next attempt. A scanner that ran into the timeout is
+ * not retried: the same sweep would hit the same limit, three times over.
  */
 
 export function executeJob(root, job, options = {}) {
   const spawnFn = options.spawnFn || spawnSync;
   const startedAt = Date.now();
   let lastError = "Scan failed";
+  let finalAttempt = MAX_ATTEMPTS;
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     let tempPortals = null;
@@ -229,9 +228,13 @@ export function executeJob(root, job, options = {}) {
           message: `Scan finished with ${rolesFound} matching role${rolesFound === 1 ? "" : "s"}.`,
         };
       }
-      lastError = firstErrorLine(result);
+      lastError = scanFailureMessage(result, { timeoutMs: SCAN_TIMEOUT_MS });
+      if (result.error?.code === "ETIMEDOUT") {
+        finalAttempt = attempt;
+        break;
+      }
     } catch (error) {
-      lastError = firstErrorLine({ error });
+      lastError = scanFailureMessage({ error });
     } finally {
       if (tempPortals) {
         try {
@@ -245,7 +248,7 @@ export function executeJob(root, job, options = {}) {
 
   return {
     state: "failed",
-    attempt: MAX_ATTEMPTS,
+    attempt: finalAttempt,
     rolesFound: 0,
     durationMs: Date.now() - startedAt,
     message: lastError,
@@ -293,13 +296,24 @@ function requestedJobId(args) {
 
 async function main() {
   const root = getCareerOpsRoot();
+  const manualJobId = requestedJobId(process.argv.slice(2));
   const storePath = scheduledStorePath(root);
   const runnerResource = runnerResourcePath(storePath);
-  const manualJobId = requestedJobId(process.argv.slice(2));
 
   return withResourceLock(
     runnerResource,
     async () => {
+      // The inbox belongs to the 15-minute worker. Running one job by hand does not drain it.
+      // The poll shares this lock so two workers cannot plan the same alert.
+      if (!manualJobId) {
+        try {
+          await pollLinkedInInbox(root, {
+            log: (line) => process.stderr.write(`${line}\n`),
+          });
+        } catch (error) {
+          process.stderr.write(`linkedin inbox: ${error instanceof Error ? error.message : String(error)}\n`);
+        }
+      }
       let claim;
       if (manualJobId) {
         if (!isSafeScheduledId(manualJobId)) throw new Error("Invalid scheduled job identifier.");

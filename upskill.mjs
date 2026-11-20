@@ -26,8 +26,9 @@ import { readFileSync, existsSync, statSync, realpathSync, writeFileSync, symlin
 import { join, dirname, relative, resolve, sep } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { loadYaml } from './lib/yaml-document.mjs';
+import { machineSummarySection } from './lib/machine-summary-section.mjs';
 import { resolveColumns, parseTrackerRow, firstLinkTarget } from './tracker-parse.mjs';
-import { validateFlags } from './lib/cli-flags.mjs';
+import { validateFlags, flagValue, hasFlag } from './lib/cli-flags.mjs';
 import { loadCanonicalStates, resolveCanonicalStateId } from './tracker-utils.mjs';
 import { rankSkipBlockers, parseRequirementImportance } from './skip-blockers.mjs';
 
@@ -112,6 +113,7 @@ const LOW_FIT_SCORE = 4.0;
 // exported here so existing importers of extractSkills keep working unchanged.
 import { extractSkills } from './skill-extract.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
+import { browserLaunchOptions } from './lib/browser-launch.mjs';
 export { extractSkills };
 
 // --- Known-skills text assembly ---
@@ -265,7 +267,7 @@ export function readOptionalText(filePath) {
 // --- Machine Summary + Gap table parsing ---
 // Mirrors analyze-patterns.mjs (duplicated by design, see header comment).
 function parseMachineSummary(content) {
-  const fenceMatch = content.match(/##\s*Machine Summary\s*\n+```(?:yaml|yml|json)?\s*\n([\s\S]*?)\n```/i);
+  const fenceMatch = machineSummarySection(content).match(/^##\s*Machine Summary\s*\n+```(?:yaml|yml|json)?\s*\n([\s\S]*?)\n```/i);
   if (!fenceMatch) return null;
   const raw = fenceMatch[1].trim();
   if (!raw) return null;
@@ -843,7 +845,10 @@ const isMain = isMainModule(import.meta.url);
 // are read, and before --help, so `--help --bogus` still errors.
 const KNOWN_FLAGS = ['--min-reports', '--summary', '--url-text', '--self-test', '--help', '-h'];
 
-// Only --min-reports and --url-text take their value as the next argv token.
+// Only --min-reports and --url-text take a value, as the next argv token or as
+// `--flag=value`. validateFlags accepts either form, so both are read with
+// flagValue(): an indexOf() lookup cannot see `--url-text=<url>` (the aggregate
+// map ran instead) or `--min-reports=3` (the default of 5 applied instead).
 const VALUE_FLAGS = ['--min-reports', '--url-text'];
 
 const USAGE = `Usage:
@@ -869,13 +874,13 @@ if (isMain) {
   if (args.includes('--self-test')) runSelfTest();
 
   // ====== SECURE TARGETED MODE PHASE 2a IMPLEMENTATION ======
-  const urlTextIdx = args.indexOf('--url-text');
+  const urlTextGiven = hasFlag(args, '--url-text');
   const directUrl = args.find(arg => arg.startsWith('http://') || arg.startsWith('https://'));
 
-  if (urlTextIdx !== -1 || directUrl) {
+  if (urlTextGiven || directUrl) {
     (async () => {
       let targetText = '';
-      const inputSource = urlTextIdx !== -1 ? args[urlTextIdx + 1] : directUrl;
+      const inputSource = urlTextGiven ? flagValue(args, '--url-text') : directUrl;
 
       if (!inputSource) {
         console.error('Error: Please provide a valid URL or file path after --url-text');
@@ -887,7 +892,7 @@ if (isMain) {
         try {
           const secureUrl = await validateUrlSecurity(inputSource);
           const { chromium } = await import('playwright');
-          browser = await chromium.launch({ headless: true });
+          browser = await chromium.launch(browserLaunchOptions({ headless: true }));
           const page = await browser.newPage();
 
           await page.route('**/*', async (route) => {
@@ -997,10 +1002,10 @@ if (isMain) {
     });
   } else {
     // ====== ORIGINAL AGGREGATE MODE PIPELINE ======
-    const minReportsIdx = args.indexOf('--min-reports');
+    const minReportsRaw = flagValue(args, '--min-reports');
     const MIN_REPORTS = (() => {
-      if (minReportsIdx === -1 || args[minReportsIdx + 1] === undefined) return 5;
-      const n = parseInt(args[minReportsIdx + 1], 10);
+      if (minReportsRaw === undefined) return 5;
+      const n = parseInt(minReportsRaw, 10);
       return Number.isNaN(n) || n < 1 ? 5 : n;
     })();
 

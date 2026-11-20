@@ -14,6 +14,7 @@ import {
   cleanHeading,
   firstProseParagraph,
   isLeadSection,
+  legitimacyTone,
   isVerdictHeading,
   splitSections,
   sectionPreview,
@@ -37,9 +38,21 @@ test("a block added past H needs no code change", () => {
   assert.equal(authorLetter("Z. Last One"), "Z");
 });
 
-test("the (lead) / (verdict) marker is dropped with the letter", () => {
+test("the (lead) / (verdict) / (draft) marker is dropped with the letter", () => {
   assert.equal(cleanHeading("F) Verdict (lead)"), "Verdict");
   assert.equal(cleanHeading("F) Verdict (verdict)"), "Verdict");
+  // The evaluation modes write "(draft)" on the draft-answers block so the core
+  // reader can find it in any language (#3884); the viewer must not see it either.
+  assert.equal(cleanHeading("H) Draft Application Answers (draft)"), "Draft Application Answers");
+  assert.equal(cleanHeading("G) Чернетки відповідей на форму (draft)"), "Чернетки відповідей на форму");
+});
+
+test("(draft) marks the draft-answers block, never the verdict callout", () => {
+  // Both markers are stripped for display, but only (lead)/(verdict) leads the
+  // report. A draft-answers block rendered as the Verdict callout would put
+  // unsent application answers where the hiring decision belongs.
+  assert.equal(isVerdictHeading("H) Draft Application Answers (draft)"), false);
+  assert.equal(isVerdictHeading("G) Szkice odpowiedzi do aplikacji (draft)"), false);
 });
 
 test("all three delimiters and the spelled-out Block form", () => {
@@ -242,6 +255,42 @@ test("applyLineLabel: a flagged posting above the line is not Recommended", () =
   assert.equal(applyLineLabel("4.9/5", "Suspicious"), "Check the posting first");
   assert.equal(applyLineLabel("4.9/5", "High Confidence"), "Recommended");
   assert.equal(applyLineLabel("3.1/5", "Proceed with Caution"), "Below the apply line");
+});
+
+test("applyLineLabel: Turkish legitimacy tiers flag the posting too", () => {
+  assert.equal(applyLineLabel("4.9/5", "Dikkatli İlerle"), "Check the posting first");
+  assert.equal(applyLineLabel("4.9/5", "Şüpheli"), "Check the posting first");
+  assert.equal(applyLineLabel("4.9/5", "Güvenilir"), "Recommended");
+  assert.equal(applyCtaQuiet({ score: 4.5, legitimacy: "Şüpheli" }), true);
+});
+
+test("applyLineLabel: Chinese legitimacy tiers flag the posting too", () => {
+  // modes/zh/oferta.md (Simplified) and modes/zh-TW/oferta.md (Traditional).
+  assert.equal(applyLineLabel("4.9/5", "谨慎推进"), "Check the posting first");
+  assert.equal(applyLineLabel("4.9/5", "疑似虚假"), "Check the posting first");
+  assert.equal(applyLineLabel("4.9/5", "高置信度"), "Recommended");
+  assert.equal(applyLineLabel("4.9/5", "審慎推進"), "Check the posting first");
+  assert.equal(applyLineLabel("4.9/5", "疑似虛假"), "Check the posting first");
+  assert.equal(applyLineLabel("4.9/5", "高信心"), "Recommended");
+  assert.equal(applyCtaQuiet({ score: 4.5, legitimacy: "疑似虚假" }), true);
+  assert.equal(applyCtaQuiet({ score: 4.5, legitimacy: "審慎推進" }), true);
+  assert.equal(applyCtaQuiet({ score: 4.5, legitimacy: "高信心" }), false);
+});
+
+test("legitimacyTone: English, Turkish and Chinese tiers map to good / warn / bad", () => {
+  assert.equal(legitimacyTone("High Confidence"), "good");
+  assert.equal(legitimacyTone("Proceed with Caution"), "warn");
+  assert.equal(legitimacyTone("Suspicious"), "bad");
+  assert.equal(legitimacyTone("Güvenilir"), "good");
+  assert.equal(legitimacyTone("Dikkatli İlerle"), "warn");
+  assert.equal(legitimacyTone("Şüpheli"), "bad");
+  assert.equal(legitimacyTone("高置信度"), "good");
+  assert.equal(legitimacyTone("谨慎推进"), "warn");
+  assert.equal(legitimacyTone("疑似虚假"), "bad");
+  assert.equal(legitimacyTone("高信心"), "good");
+  assert.equal(legitimacyTone("審慎推進"), "warn");
+  assert.equal(legitimacyTone("疑似虛假"), "bad");
+  assert.equal(legitimacyTone("unknown"), "muted");
 });
 
 test("applyCtaQuiet: below the apply line or caution legitimacy", () => {

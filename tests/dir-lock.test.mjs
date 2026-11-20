@@ -438,7 +438,7 @@ test('isForeignOwner: host field decides; legacy POSIX paths are foreign only on
   const legacyContainer = { pid: 7, pipeline: '/sessions/rcw-x/mnt/career-ops/data/pipeline.md' };
   assert.equal(isForeignOwner(legacyContainer, { platform: 'win32' }), true);
   assert.equal(isForeignOwner(legacyContainer, { platform: 'linux' }), false, 'on POSIX a legacy stamp keeps the pid rule');
-  assert.equal(isForeignOwner({ pid: 48564, file: 'C:/Users/x/data/portal-health.tsv' }, { platform: 'win32' }), false);
+  assert.equal(isForeignOwner({ pid: 48564, file: 'D:/work/career-ops/data/portal-health.tsv' }, { platform: 'win32' }), false);
   assert.equal(isForeignOwner({ pid: 48564 }, { platform: 'win32' }), false, 'a Windows-shaped pid with no other evidence: pid rule');
   // The August container stamps: pid 5, RELATIVE path. Windows pids are multiples of 4.
   assert.equal(isForeignOwner({ pid: 5, pipeline: 'data/pipeline.md' }, { platform: 'win32' }), true);

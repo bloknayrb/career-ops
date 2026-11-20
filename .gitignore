@@ -8,6 +8,13 @@ redline-check.mjs
 data/applications.md
 data/pipeline.md
 data/scan-history.tsv
+# A CV exported or saved at the repo root (cv.pdf, resume.docx). The repo
+# tracks no PDF or DOCX anywhere; the rules are root-anchored so a fixture or
+# doc added under a subdirectory later is not silently ignored (#6535). The
+# brackets match any casing (CV.PDF), which git compares case-sensitively on a
+# case-sensitive filesystem.
+/*.[pP][dD][fF]
+/*.[dD][oO][cC][xX]
 local/
 # Everything under data/ is generated or personal at runtime — only .gitkeep
 # placeholders are tracked (verify with `git ls-files data/`). A blanket rule
@@ -25,9 +32,47 @@ data/parser-output/**
 !data/parser-output/.gitkeep
 !data/parser-output/**/.gitkeep
 reports/*.md
+# Single-level glob above misses subdirectories (e.g. reports/superseded/).
+# Kept alongside it rather than replacing it, so update-system.mjs does not
+# re-append the original pattern as "missing".
+reports/**/*.md
+# The two globs above cover markdown only, but anything else in reports/ is
+# the same evaluation: an exported PDF or HTML copy, a superseded/ folder of
+# them. Kept as a third rule for the same updater reason (#6535).
+reports/*
 !reports/.gitkeep
 output/*
 !output/.gitkeep
+# batch/ holds generated worker output. Ignore the directory and allowlist the
+# tracked scaffolding, so a filename a future generator picks is covered by
+# default. AGENTS.md already states the intent this way: "Batch in batch/
+# (gitignored except scripts and prompt)". Enumerating the outputs instead only
+# covers the names that existed when the list was written, which left
+# batch/cv-*.json and batch/cover-*.json stageable, and those carry the
+# candidate's CV content.
+batch/*
+!batch/README.md
+!batch/aggregate-tokens.mjs
+!batch/batch-prompt.md
+!batch/batch-prompt-match.md
+!batch/batch-runner.sh
+!batch/company-scope.mjs
+!batch/jd-rescue.mjs
+# No trailing slash, so git descends into the two keeper directories. A slashed
+# pattern matches only a real directory and would miss a symlink.
+!batch/logs
+!batch/tracker-additions
+# tracker-additions never had a blanket child rule, only the **/*.tsv one below,
+# so a non-.tsv file dropped straight into it was stageable. The .gitkeep
+# negations further down still win over this on an already-updated install, not
+# only in a fresh clone: reconcileGitignore() re-emits a negation the install
+# already has after the patterns it appends, which is what #4142 added.
+batch/tracker-additions/*
+# The enumerated rules below are now redundant in a fresh clone, and are kept
+# rather than deleted. The reconciler only ever appends, so deleting them here
+# would not remove them from an existing install; it would only drop them from
+# fresh clones, where batch/logs/* is still what re-ignores that directory's
+# contents once !batch/logs has let git descend into it.
 batch/logs/*
 !batch/logs/.gitkeep
 batch/batch-state.tsv
@@ -65,6 +110,13 @@ writing-samples/*
 config/profile.yml
 config/cv-facts.json
 config/benchmarks.yml
+# Privacy guard configuration and token map — both hold real personal values.
+# config/privacy.example.yml (fictional placeholders only) ships; the real file
+# never does. The token map records the original values behind the placeholders
+# pii-workspace.mjs writes, so it is exactly as sensitive as cv.md.
+config/privacy.yml
+.pii-token-map.json
+**/.pii-token-map.json
 # Fork-local path declarations — this checkout's own files, read by
 # update-system.mjs. Upstream gitignores config/local-paths.txt here; THIS FORK
 # DELIBERATELY TRACKS IT and the rule is omitted on purpose. See the note further
@@ -175,6 +227,9 @@ data/model-blacklist.json
 .idea/
 .vscode/
 
+# direnv local environment cache (machine-local, never shared)
+.direnv/
+
 # CLI-specific local config
 .claude/settings.local.json
 .mcp.json
@@ -187,6 +242,9 @@ opencode.json
 # personal server credentials (e.g. a plugin's API token) once a user adds
 # an MCP server, same risk class as .env.
 .mcp.json
+# Hermes Agent personal project rules. docs/HERMES.md offers it as a way to
+# supply rules that override AGENTS.md without sharing them with the repository.
+.hermes.md
 career-dashboard
 package-lock.json
 
@@ -512,6 +570,15 @@ node_modules
 !/documents/
 !documents/.gitkeep
 !documents/README.md
+# Intake fingerprints — the recorded source filenames may themselves carry
+# PII (e.g. cv/jane-doe-master-cv.pdf). #1723
+data/intake-state.json
+# Intake snapshots — the full extracted text of each committed source, so the
+# whole master CV. data/* already covers it; named here as well, like the
+# ledger above, so a hand-trimmed .gitignore still keeps it out. #5779
+data/intake-snapshots/
+data/agent-inbox.md
+
 # Older installs keep unanchored scaffold negations because reconcileGitignore()
 # only appends rules. Re-ignore matching user-layer folders under data/ after
 # those legacy patterns so personal files stay out of git status and commits.

@@ -10,7 +10,7 @@
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { pass, fail, ROOT } from './helpers.mjs';
-import { linkedInJobId, linkedInPathJobId, linkedInGuestUrl } from '../lib/linkedin-url.mjs';
+import { linkedInJobId, linkedInPathJobId, linkedInGuestUrl, linkedInCanonicalKey } from '../lib/linkedin-url.mjs';
 import { resolveAtsApi } from '../liveness-api.mjs';
 import { aggregatorPostingId } from '../url-key.mjs';
 
@@ -103,6 +103,14 @@ check('url-key folds a trailing-dot host', aggregatorPostingId(dotted)?.id === I
 check('linkedInJobId keeps the strict host test', idOf(dotted) === null);
 check('linkedInPathJobId reads the path without the host',
   linkedInPathJobId(new URL(`https://example.com/comm/jobs/view/${ID}`)) === ID);
+check('linkedInCanonicalKey folds the spellings onto one id',
+  linkedInCanonicalKey(`https://www.linkedin.com/jobs/view/title-at-co-${ID}?trk=x`) === `linkedin.com:${ID}`
+  && linkedInCanonicalKey(`https://www.linkedin.com/comm/jobs/view/${ID}/`) === `linkedin.com:${ID}`
+  && linkedInCanonicalKey(`https://www.linkedin.com/jobs/search/?currentJobId=${ID}`) === `linkedin.com:${ID}`
+  && linkedInCanonicalKey(`https://linkedin.com./jobs/view/${ID}`) === `linkedin.com:${ID}`);
+check('linkedInCanonicalKey ignores a non-posting',
+  linkedInCanonicalKey('https://www.linkedin.com/in/someone') === ''
+  && linkedInCanonicalKey('https://example.com/jobs/view/123') === '');
 
 // -- 6. loadable outside Node, and shipped by the updater --------------------
 // A browser bundle has to be able to load this file, so it must import nothing.
@@ -111,5 +119,5 @@ check('the module has no imports', !/^\s*import\b|\bimport\s*\(|\brequire\s*\(/m
 
 // liveness-api.mjs is a SYSTEM_PATHS file: an upgraded install whose updater
 // had no entry for this module would check out a liveness-api that cannot load.
-const updaterSrc = readFileSync(join(ROOT, 'update-system.mjs'), 'utf-8');
-check('update-system.mjs ships lib/linkedin-url.mjs', updaterSrc.includes("'lib/linkedin-url.mjs'"));
+const manifestSrc = readFileSync(join(ROOT, 'lib', 'update-manifest.mjs'), 'utf-8');
+check('the updater ships lib/linkedin-url.mjs', manifestSrc.includes("'lib/linkedin-url.mjs'"));

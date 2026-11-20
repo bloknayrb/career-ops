@@ -29,7 +29,7 @@
  *   node rank-pipeline.mjs --self-test         # in-memory suite; spawns no subprocess
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync } from 'fs';
+import { readFileSync, existsSync, mkdtempSync, rmSync } from 'fs';
 import { execFileSync } from 'child_process';
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
@@ -37,9 +37,13 @@ import { fileURLToPath } from 'url';
 import { flagValue, hasFlag, safeIntFlag, validateFlags } from './lib/cli-flags.mjs';
 import { sanitizeMarkdownField } from './scan.mjs';
 import { withPipelineLock } from './pipeline-lock.mjs';
+import { replaceUserFile } from './tracker-utils.mjs';
+import { scorePosting } from './lib/inbox-rank.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
 import { getCareerOpsRoot } from './path-resolver.mjs';
 import { readRememberedCli } from './lib/agent-cli.mjs';
+import { resolveCliLaunch } from './lib/agent-launch.mjs';
+import { SCORE_MAX, SCORE_MIN } from './lib/score-action.mjs';
 
 const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
 const DATA_ROOT = getCareerOpsRoot();
@@ -99,6 +103,7 @@ export const CLI_CANDIDATES = [
   { bin: 'agy', id: 'antigravity', args: p => ['-p', p] },
   { bin: 'grok', args: p => ['-p', p, '--disable-web-search', '--disallowed-tools', GROK_DENIED_TOOLS] },
   { bin: 'pi', args: p => ['--no-tools', '-p', p] },
+  { bin: 'omp', args: p => ['--no-tools', '-p', p] },
 ];
 
 const USAGE = `
@@ -125,21 +130,42 @@ const KNOWN_FLAGS = [
 ];
 const VALUE_FLAGS = ['--limit', '--cli', '--model'];
 /**
- * Clamp to [0,5] at one decimal, and sanitize the reason so a model-generated
- * string can never break the row's pipe-delimited grammar or forge a new row.
+ * Clamp to SCORE_MIN..SCORE_MAX (lib/score-action.mjs) at one decimal, and
+ * sanitize the reason so a model-generated string can never break the row's
+ * pipe-delimited grammar or forge a new row.
  * Returns '' when there is no usable reason — the caller then skips the entry
  * rather than writing a bare number.
  */
 export function formatRankSegment(score, reason) {
   const n = Number(score);
   if (!Number.isFinite(n)) return '';
-  const clamped = Math.min(5, Math.max(0, n)).toFixed(1);
+  const clamped = Math.min(SCORE_MAX, Math.max(SCORE_MIN, n)).toFixed(1);
   // sanitizeMarkdownField collapses newlines/tabs and maps `|` to `/`, so the
   // reason cannot inject a column break or a fake `- [ ]` line.
   let clean = sanitizeMarkdownField(reason ?? '').trim();
   if (!clean) return '';
   if (clean.length > REASON_MAX) clean = `${clean.slice(0, REASON_MAX - 1).trimEnd()}…`;
   return `rank: ${clamped}/5 — ${clean}`;
+}
+
+/**
+ * Same fit rule the inbox uses, written in this file's stamp shape.
+ * main() does not call it. The LLM pass stays opt-in and unchanged.
+ *
+ * @param {{ title?: string, location?: string, pay?: string, rankStamp?: string | null }} entry
+ * @param {Parameters<typeof scorePosting>[1]} targets
+ * @returns {string} A `rank:` segment, or '' when the row is unranked.
+ */
+export function heuristicSegment(entry, targets) {
+  const source = entry || {};
+  const fit = scorePosting({
+    title: source.title ?? '',
+    location: source.location ?? '',
+    pay: source.pay ?? '',
+    rankStamp: source.rankStamp ?? null,
+  }, targets);
+  if (!fit) return '';
+  return formatRankSegment(fit.score, fit.reason);
 }
 
 /**
@@ -244,7 +270,8 @@ export function detectCli(candidates = CLI_CANDIDATES, probe = defaultProbe) {
 
 function defaultProbe(bin) {
   try {
-    execFileSync(bin, ['--version'], { stdio: 'ignore', timeout: 3000 });
+    const launch = resolveCliLaunch(bin, ['--version']);
+    execFileSync(launch.command, launch.args, { stdio: 'ignore', timeout: 3000 });
     return true;
   } catch {
     return false;
@@ -313,6 +340,7 @@ function callCli(cli, prompt, model, timeout) {
   if (model) args.push('--model', model);
   // An empty directory gives an agent CLI nothing to read, and keeps it out of
   // the user's CV, reports and tracker.
+  const launch = resolveCliLaunch(cli.bin, args);
   const cwd = mkdtempSync(join(tmpdir(), 'career-ops-rank-'));
   try {
     // Explicit maxBuffer: a verbose response otherwise throws
@@ -320,7 +348,7 @@ function callCli(cli, prompt, model, timeout) {
     // killSignal SIGKILL: execFileSync's default SIGTERM leaves a CLI that
     // traps the signal running until the parent gives up, which blocks later
     // batches and the unranked report.
-    return execFileSync(cli.bin, args, {
+    return execFileSync(launch.command, launch.args, {
       cwd,
       env: { ...process.env, ...cli.env },
       encoding: 'utf-8',
@@ -346,6 +374,8 @@ export function describeCliFailure(err, bin, timeoutMs) {
     return timeoutMs ? `${bin} timed out after ${timeoutMs / 1000} s; raise CAREER_OPS_RANK_TIMEOUT_MS to wait longer` : `${bin} timed out`;
   }
   if (err?.code === 'ENOENT') return `${bin} not found`;
+  // resolveCliLaunch's own message names the shim, never the prompt.
+  if (err?.code === 'ERR_CLI_LAUNCH') return err.message;
   const lines = String(err?.stderr ?? '').replace(ANSI, '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
   const detail = lines.find(l => /error/i.test(l)) ?? lines.at(-1);
   const exit = err?.status != null ? `${bin} exited with code ${err.status}` : `${bin} failed`;
@@ -478,7 +508,7 @@ async function main(args) {
       const current = readFileSync(PIPELINE_PATH, 'utf-8');
       const result = applyAnnotations(current, annotations, original);
       written = result.written;
-      if (written) writeFileSync(PIPELINE_PATH, result.text);
+      if (written) replaceUserFile(PIPELINE_PATH, result.text);
     });
   }
 
