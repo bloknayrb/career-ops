@@ -120,7 +120,17 @@ export function squashPdfText(text) {
  * the PDF rendered afterwards is untouched). This only ADDS expected text, so
  * it cannot make clipped content pass; genuinely clipped generated content now
  * fails too. Content the capture cannot resolve (counter(), url(), quotes) is
- * left out, exactly as before this patch. Re-apply after every upstream update.
+ * left out, exactly as before this patch. Pseudo-elements with opacity 0 or
+ * font-size 0 are skipped, since they print nothing.
+ *
+ * Known residuals (each can still cause a false "clipped" failure, none can
+ * hide real clipping): the temporary nodes are real children while innerText
+ * is read, so author STRUCTURAL selectors (:first-child, :last-child, :empty,
+ * :nth-child) re-match around them (type selectors cannot, because the node
+ * is a custom element); generated text positioned off the page is captured
+ * but not printed; and, as before this patch, body::before/::after, ::marker
+ * content and pseudo-elements on broken <img> print but are not captured.
+ * Re-apply after every upstream update.
  *
  * @param {import('playwright').Page} page - Page with the document loaded.
  * @returns {Promise<{text: string, isRtl: boolean}>}
@@ -163,6 +173,8 @@ export async function captureRenderedBodyText(page) {
       for (const pseudo of ['::before', '::after']) {
         const style = getComputedStyle(el, pseudo);
         if (style.display === 'none' || style.visibility !== 'visible') continue;
+        // Painted invisibly: present in the DOM sense, absent from the PDF.
+        if (parseFloat(style.opacity) === 0 || parseFloat(style.fontSize) === 0) continue;
         const text = resolveContent(style.content, el);
         if (text) found.push({ el, pseudo, text, textTransform: style.textTransform });
       }
@@ -171,8 +183,12 @@ export async function captureRenderedBodyText(page) {
     const inserted = [];
     try {
       for (const { el, pseudo, text, textTransform } of found) {
-        const span = document.createElement('span');
+        // An inert custom element, not a <span>, so author type selectors
+        // (`.row > span { ... }`) cannot match it; inline !important so no
+        // author rule can hide it.
+        const span = document.createElement('co-pseudo-capture');
         span.textContent = text;
+        span.style.setProperty('display', 'inline', 'important');
         span.style.textTransform = textTransform;
         if (pseudo === '::before') el.insertBefore(span, el.firstChild);
         else el.appendChild(span);

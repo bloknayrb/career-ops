@@ -49,6 +49,10 @@ const CONTACT_CSS = `
   .hidden-pseudo::after { content: "NEVER-PRINTED"; display: none; }
   .hex::after { content: "\\A tail"; }
   .wrap .contact-row::after { content: "END"; }
+  .typed > span { display: none; }
+  .typed::before { content: "PRE"; }
+  .faded::after { content: "OPACITY-ZERO"; opacity: 0; }
+  .tiny::after { content: "FONT-ZERO"; font-size: 0; }
 `;
 const CONTACT_ROW = `
   <div class="contact-row">
@@ -57,7 +61,10 @@ const CONTACT_ROW = `
     <span>Springfield</span>
   </div>`;
 
-const doc = (body) => `<!doctype html><html lang="en"><head><style>${CONTACT_CSS}</style></head><body>${body}</body></html>`;
+// Page size and margin through CSS @page, as generate-pdf.mjs's
+// injectPrintPageCss() does, printed with the same page.pdf() options.
+const doc = (body) => `<!doctype html><html lang="en"><head><style>
+  @page { size: Letter; margin: ${PDF_PAGE_MARGIN}; }${CONTACT_CSS}</style></head><body>${body}</body></html>`;
 
 // The same capture -> print -> assert sequence generate-pdf.mjs runs. Not
 // through renderHtmlToPdf itself: that also records the PDF in the real data
@@ -70,7 +77,11 @@ async function render(html) {
     await page.setContent(html, { waitUntil: 'load' });
     const body = await captureRenderedBodyText(page);
     const pdfPath = join(workspace, 'cv.pdf');
-    writeFileSync(pdfPath, await page.pdf({ format: 'Letter', margin: { top: PDF_PAGE_MARGIN, right: PDF_PAGE_MARGIN, bottom: PDF_PAGE_MARGIN, left: PDF_PAGE_MARGIN } }));
+    writeFileSync(pdfPath, await page.pdf({
+      printBackground: true,
+      margin: { top: '0', right: '0', bottom: '0', left: '0' },
+      preferCSSPageSize: true,
+    }));
     return await assertPdfContentCoverage(pdfPath, body);
   } finally {
     await browser.close();
@@ -92,7 +103,9 @@ test('the capture includes printed generated content and restores the DOM', { sk
     // The row's own ::after makes this a test of read-then-insert: inserting while
     // reading would make "Springfield" stop being :last-child and gain a "|".
     await page.setContent(doc(`<div class="wrap">${CONTACT_ROW}</div>`
-      + '<p class="lead">x</p><p class="hidden-pseudo">y</p><p class="hex">head</p>'));
+      + '<p class="lead">x</p><p class="hidden-pseudo">y</p><p class="hex">head</p>'
+      + '<p class="faded">a</p><p class="tiny">b</p>'
+      + '<p class="typed"><span>HIDDEN-SPAN</span><b>shown</b></p>'));
     const before = await page.evaluate(() => document.body.innerHTML);
     const { text } = await captureRenderedBodyText(page);
     const squashed = text.replace(/\s+/g, '');
@@ -100,6 +113,10 @@ test('the capture includes printed generated content and restores the DOM', { sk
     assert.match(squashed, /headtail/, 'a hex escape (\\A) decodes to a line break, not a literal "a"');
     assert.match(squashed, /Note:x/);
     assert.doesNotMatch(text, /NEVER-PRINTED/, 'a display:none pseudo-element is not printed');
+    assert.doesNotMatch(text, /OPACITY-ZERO/, 'an opacity:0 pseudo-element prints nothing');
+    assert.doesNotMatch(text, /FONT-ZERO/, 'a font-size:0 pseudo-element prints nothing');
+    assert.match(squashed, /PREshown/, 'an author `span` type selector does not hide the captured text');
+    assert.doesNotMatch(text, /HIDDEN-SPAN/, 'the hidden author span stays out');
     assert.equal(await page.evaluate(() => document.body.innerHTML), before, 'temporary nodes were removed');
   } finally {
     await browser.close();
