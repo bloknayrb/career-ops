@@ -13,14 +13,15 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { toolRequired } from './required-tools.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const { renderHtmlToPdf } = await import(pathToFileURL(join(ROOT, 'generate-pdf.mjs')).href);
-const { captureRenderedBodyText } = await import(pathToFileURL(join(ROOT, 'pdf-config.mjs')).href);
+const { captureRenderedBodyText, assertPdfContentCoverage, PDF_PAGE_MARGIN } =
+  await import(pathToFileURL(join(ROOT, 'pdf-config.mjs')).href);
 
 let chromium;
 let launchError = null;
@@ -31,7 +32,14 @@ try {
 } catch (err) {
   launchError = err;
 }
-const skip = launchError ? `Chromium cannot launch (${String(launchError.message).split('\n')[0]})` : false;
+// A missing Chromium skips locally but fails where the run requires a browser
+// (the tool-suites CI job sets the env var tests/required-tools.mjs names).
+const skip = launchError && !toolRequired('browser')
+  ? `Chromium cannot launch (${String(launchError.message).split('\n')[0]})`
+  : false;
+if (launchError && !skip) {
+  test('Chromium launches (required in this run)', () => { throw launchError; });
+}
 
 // Same rule shape the CV template ships, on synthetic contact data.
 const CONTACT_CSS = `
@@ -51,11 +59,21 @@ const CONTACT_ROW = `
 
 const doc = (body) => `<!doctype html><html lang="en"><head><style>${CONTACT_CSS}</style></head><body>${body}</body></html>`;
 
+// The same capture -> print -> assert sequence generate-pdf.mjs runs. Not
+// through renderHtmlToPdf itself: that also records the PDF in the real data
+// root's data/pdf-index.tsv, which a test must never touch.
 async function render(html) {
   const workspace = realpathSync(mkdtempSync(join(tmpdir(), 'career-ops-pdf-gencontent-')));
+  const browser = await chromium.launch({ headless: true });
   try {
-    return await renderHtmlToPdf(html, join(workspace, 'cv.pdf'), { workspaceRoot: workspace, format: 'letter' });
+    const page = await browser.newPage();
+    await page.setContent(html, { waitUntil: 'load' });
+    const body = await captureRenderedBodyText(page);
+    const pdfPath = join(workspace, 'cv.pdf');
+    writeFileSync(pdfPath, await page.pdf({ format: 'Letter', margin: { top: PDF_PAGE_MARGIN, right: PDF_PAGE_MARGIN, bottom: PDF_PAGE_MARGIN, left: PDF_PAGE_MARGIN } }));
+    return await assertPdfContentCoverage(pdfPath, body);
   } finally {
+    await browser.close();
     rmSync(workspace, { recursive: true, force: true });
   }
 }
@@ -64,7 +82,7 @@ test('a CV whose contact separators are ::after content passes the content check
   const html = doc(`<h1>Test Candidate</h1>${CONTACT_ROW}
     <p class="lead">builds test systems.</p><p class="hidden-pseudo">Fictional Ltd</p>`);
   const result = await render(html);
-  assert.ok(result.pageCount >= 1);
+  assert.equal(result.checked, true, 'the check ran rather than skipping');
 });
 
 test('the capture includes printed generated content and restores the DOM', { skip }, async () => {
