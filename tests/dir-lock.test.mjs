@@ -25,6 +25,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   acquireDirLock, tryAcquireDirLockSync, lockRecoveryVerdict, releaseOrWarn, DirLockTimeoutError, RECOVER_LIVE, RECOVER_STALE,
+  LOCK_HOST_ID, isForeignOwner,
 } from '../lib/dir-lock.mjs';
 import { acquirePortalHealthLock, LockTimeoutError as PortalLockTimeoutError } from '../portal-health-lock.mjs';
 import { acquirePipelineLock } from '../pipeline-lock.mjs';
@@ -399,4 +400,61 @@ test('a release releaseOrWarn gives up on does not pin the leftover lock live', 
     console.error = realError;
   }
   assert.equal(lockRecoveryVerdict(lockDir, 1), RECOVER_STALE, 'abandoned: the old leftover ages out');
+});
+
+// FORK-LOCAL (2026-11-19): a pid is meaningful only on the host that issued it.
+// data/ is shared by Windows sessions and Linux cloud containers; a container's
+// pid 5 or 7 reads as alive on Windows (rounded to pid 4, EPERM), which pinned
+// every crashed cloud run's lock LIVE for ever. Foreign stamps go to the age rule.
+test('a stamp from another host is judged by age, not by its pid', (t) => {
+  const dir = scratch(t, 'dir-lock-foreign-');
+  const lockDir = join(dir, 'x.lock');
+  mkdirSync(lockDir);
+  // A live pid on THIS machine, but stamped by another host: the pid proves nothing.
+  fs.writeFileSync(join(lockDir, 'owner.json'), JSON.stringify({
+    pid: livePeerPid(), token: 'remote', started_at: new Date().toISOString(), host: 'some-other-host#boot',
+  }));
+  assert.equal(lockRecoveryVerdict(lockDir, 60_000), RECOVER_LIVE, 'a fresh foreign lock may be a live remote run');
+  const dayAgo = new Date(Date.now() - 86_400_000);
+  utimesSync(lockDir, dayAgo, dayAgo);
+  assert.equal(lockRecoveryVerdict(lockDir, 60_000), RECOVER_STALE, 'an old foreign lock ages out even though the pid is live here');
+});
+
+test('a stamp from this host keeps the pid rule', (t) => {
+  const dir = scratch(t, 'dir-lock-samehost-');
+  const lockDir = join(dir, 'x.lock');
+  mkdirSync(lockDir);
+  fs.writeFileSync(join(lockDir, 'owner.json'), JSON.stringify({
+    pid: livePeerPid(), token: 'peer', started_at: new Date().toISOString(), host: LOCK_HOST_ID,
+  }));
+  const dayAgo = new Date(Date.now() - 86_400_000);
+  utimesSync(lockDir, dayAgo, dayAgo);
+  assert.equal(lockRecoveryVerdict(lockDir, 60_000), RECOVER_LIVE, 'a live same-host holder is never stale, however old');
+});
+
+test('isForeignOwner: host field decides; legacy POSIX paths are foreign only on Windows', () => {
+  assert.equal(isForeignOwner({ pid: 7, host: LOCK_HOST_ID }), false);
+  assert.equal(isForeignOwner({ pid: 7, host: 'elsewhere' }), true);
+  const legacyContainer = { pid: 7, pipeline: '/sessions/rcw-x/mnt/career-ops/data/pipeline.md' };
+  assert.equal(isForeignOwner(legacyContainer, { platform: 'win32' }), true);
+  assert.equal(isForeignOwner(legacyContainer, { platform: 'linux' }), false, 'on POSIX a legacy stamp keeps the pid rule');
+  assert.equal(isForeignOwner({ pid: 48564, file: 'C:/Users/x/data/portal-health.tsv' }, { platform: 'win32' }), false);
+  assert.equal(isForeignOwner({ pid: 48564 }, { platform: 'win32' }), false, 'a Windows-shaped pid with no other evidence: pid rule');
+  // The August container stamps: pid 5, RELATIVE path. Windows pids are multiples of 4.
+  assert.equal(isForeignOwner({ pid: 5, pipeline: 'data/pipeline.md' }, { platform: 'win32' }), true);
+  assert.equal(isForeignOwner({ pid: 5, pipeline: 'data/pipeline.md' }, { platform: 'linux' }), false);
+  assert.ok(!LOCK_HOST_ID.includes('undefined') && LOCK_HOST_ID.length > 0, 'host id is a real string');
+  assert.equal(isForeignOwner(null), false);
+});
+
+test('every new stamp records the host that wrote it', async (t) => {
+  const dir = scratch(t, 'dir-lock-hoststamp-');
+  const lockDir = join(dir, 'x.lock');
+  const lock = await acquireDirLock(lockDir, { ...FAST, owner: { host: 'spoofed' } });
+  try {
+    const owner = JSON.parse(readFileSync(join(lockDir, 'owner.json'), 'utf-8'));
+    assert.equal(owner.host, LOCK_HOST_ID, 'a caller diagnostic field cannot overwrite host');
+  } finally {
+    lock.release();
+  }
 });
