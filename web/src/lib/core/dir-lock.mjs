@@ -39,7 +39,7 @@
 // Timing is caller-supplied so tests can exercise contention in milliseconds
 // instead of waiting out a multi-second constant.
 
-import { mkdirSync, rmSync, statSync, existsSync, writeFileSync, readFileSync } from 'fs';
+import { mkdirSync, rmSync, statSync, existsSync, writeFileSync, readFileSync, readlinkSync } from 'fs';
 import { join, dirname } from 'path';
 import { randomUUID } from 'crypto';
 import { hostname } from 'os';
@@ -59,27 +59,36 @@ import { hostname } from 'os';
 //   - A container reading a Windows stamp: that pid does not exist in the
 //     container, so a LIVE Windows holder would be condemned at once.
 // So a stamp now records the host that wrote it, and a stamp from another host
-// is judged by age, the same rule an ownerless lock gets. Linux adds the boot
-// id, because two cloud containers can share a hostname.
-function readBootId() {
+// is judged by age, the same rule an ownerless lock gets. On Linux the scope
+// that gives a pid its meaning is the pid NAMESPACE, not the host: cloud
+// sessions can share a hostname ("vm") and a VM kernel (so the same boot_id),
+// yet each has its own pid namespace where low pids are always taken. So the
+// id adds the pid-namespace inode, plus boot_id because those inodes repeat
+// across boots.
+function readProc(read) {
   try {
-    return readFileSync('/proc/sys/kernel/random/boot_id', 'utf-8').trim();
+    return read();
   } catch {
     return '';
   }
 }
-export const LOCK_HOST_ID = [hostname(), process.platform === 'linux' ? readBootId() : '']
-  .filter(Boolean).join('#');
+export const LOCK_HOST_ID = [
+  hostname(),
+  process.platform === 'linux' ? readProc(() => readFileSync('/proc/sys/kernel/random/boot_id', 'utf-8').trim()) : '',
+  process.platform === 'linux' ? readProc(() => readlinkSync('/proc/self/ns/pid')) : '',
+].filter(Boolean).join('#');
 
-// A stamp written before LOCK_HOST_ID existed has no `host`. On Windows, a
-// recorded path that starts with '/' cannot have been written by this
-// machine, so the stamp is foreign. Every other legacy stamp keeps the pid
-// rule it always had.
+// A stamp written before LOCK_HOST_ID existed has no `host`. On Windows such a
+// stamp is foreign when it proves it: Windows pids are always multiples of 4,
+// so any other pid came from somewhere else (the August container stamps were
+// pid 5 with a RELATIVE path), and a recorded path starting with '/' cannot
+// have been written here either. Every other legacy stamp keeps the pid rule.
 const LEGACY_PATH_FIELDS = ['pipeline', 'file', 'path', 'tracker'];
 export function isForeignOwner(owner, { hostId = LOCK_HOST_ID, platform = process.platform } = {}) {
   if (!owner || typeof owner !== 'object') return false;
   if (typeof owner.host === 'string' && owner.host) return owner.host !== hostId;
   if (platform !== 'win32') return false;
+  if (Number.isInteger(owner.pid) && owner.pid % 4 !== 0) return true;
   return LEGACY_PATH_FIELDS.some((k) => typeof owner[k] === 'string' && owner[k].startsWith('/'));
 }
 
